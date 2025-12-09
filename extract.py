@@ -1,14 +1,21 @@
 import json
 import re
 import torch
+import os
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+# --- 配置部分 ---
 MODEL_PATH = "/Users/oyzh/KnowledgeGraph/models/Qwen3-4B-Instruct-2507"
+INPUT_FILE = "knowledge.json"       # 你的输入文件 (标准 JSON 数组)
+OUTPUT_FILE = "extracted.jsonl"     # 输出文件
 
+# 检测设备
 device = "mps" if torch.backends.mps.is_available() else "cpu"
-print("Using device:", device)
+print(f"Using device: {device}")
 
+# --- 模型加载 ---
+print("Loading tokenizer & model...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
@@ -16,85 +23,178 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map={"": device},
     trust_remote_code=True
 )
+print("Model loaded.")
+
+def clean_text(text):
+    """
+    针对你数据中特定的 OCR 噪声进行清洗
+    """
+    if not text:
+        return ""
+    # 替换连续的标点噪声，如 ",,:" 或 ".-."
+    text = re.sub(r'[,，:：、.\-]{2,}', ' ', text)
+    # 去除多余空白
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def parse_json_robust(text):
+    """
+    解析模型输出，能够处理 Markdown 代码块和非标准结尾
+    """
+    try:
+        return json.loads(text)
+    except:
+        pass
+    
+    # 提取 ```json ... ``` 内容
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except:
+            pass
+            
+    # 尝试寻找最外层的 {}
+    try:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start != -1 and end != 0:
+            return json.loads(text[start:end])
+    except:
+        pass
+    return None
+
+def post_process_data(data):
+    """
+    修正格式：将字符串关系 "A, r, B" 强制转为列表 ["A", "r", "B"]
+    """
+    if not data:
+        return {"entities": [], "relations": [], "attributes": []}
+    
+    # 补全缺失的键
+    for key in ["entities", "relations", "attributes"]:
+        if key not in data:
+            data[key] = []
+            
+    fixed_relations = []
+    for rel in data["relations"]:
+        # 情况1: 已经是标准列表 ["A", "r", "B"]
+        if isinstance(rel, list) and len(rel) >= 3:
+            fixed_relations.append(rel)
+        # 情况2: 是字符串 "A, r, B"
+        elif isinstance(rel, str):
+            parts = re.split(r'[,，-]\s*', rel)
+            if len(parts) >= 3:
+                fixed_relations.append([parts[0].strip(), parts[1].strip(), parts[-1].strip()])
+    
+    data["relations"] = fixed_relations
+    return data
 
 def extract_knowledge(context_text):
-    # 构造 messages 列表
+    clean_context = clean_text(context_text)
+    
+    # 文本太短通常是无效数据，跳过以节省时间
+    if len(clean_context) < 5: 
+        return {"entities": [], "relations": [], "attributes": []}
+
+    # Few-Shot Prompt: 通用领域示例，防止干扰中医实体抽取
+    few_shot_example = """
+示例输入:
+"苹果公司由史蒂夫·乔布斯、斯蒂夫·沃兹尼亚克和罗纳德·韦恩在1976年创立，总部位于加利福尼亚州。"
+示例输出:
+{
+    "entities": ["苹果公司", "史蒂夫·乔布斯", "斯蒂夫·沃兹尼亚克", "罗纳德·韦恩", "1976年", "加利福尼亚州"],
+    "relations": [
+        ["苹果公司", "创始人", "史蒂夫·乔布斯"],
+        ["苹果公司", "创始人", "斯蒂夫·沃兹尼亚克"],
+        ["苹果公司", "创立时间", "1976年"],
+        ["苹果公司", "总部位置", "加利福尼亚州"]
+    ],
+    "attributes": []
+}
+"""
+    
+    # --- 核心修改：应用方案一（通用增强版 System Prompt）---
+    system_prompt = (
+        "你是一个严格的知识图谱抽取专家。你的任务是从文本中提取结构化知识。\n"
+        "请遵循以下规则：\n"
+        "1. 抽取目标：\n"
+        "   - entities: 文本中出现的专有名词（人名、地名、机构、书名、核心概念等）。\n"
+        "   - relations: 实体之间的关系，格式严格为 [[Subject, Predicate, Object]] 的列表。\n"
+        "   - attributes: 实体的属性描述，格式为 [{\"entity\": \"...\", \"attribute\": \"...\", \"value\": \"...\"}]。\n"
+        "2. 约束条件：\n"
+        "   - 必须忠实于原文，不要编造原文中不存在的信息。\n"
+        "   - 实体必须完整（例如“李时珍”不能只写“李”）。\n"
+        "   - 如果文本没有包含有效知识，返回空数组。\n"
+        "3. 输出格式：\n"
+        "   - 仅输出合法的 JSON 字符串，禁止输出 Markdown 代码块（如 ```json），禁止输出任何解释性文字。"
+    )
+
     messages = [
-        {"role": "system", "content":
-            "你是一个严格的知识图谱抽取模型。你的唯一任务是从文本中抽取实体、关系、属性。"
-            " 输出必须是严格合法 JSON，格式为 {\"entities\": [], \"relations\": [], \"attributes\": []}。"
-            " 不允许输出任何额外说明、Markdown、代码框、解释。如果没有内容就输出空数组。"},
-        {"role": "user", "content":
-            "请从下面文本中抽取知识（实体 + 关系 + 属性）：\n\n" + context_text}
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{few_shot_example}\n\n现在处理以下文本：\n{clean_context}"}
     ]
 
     prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     inputs = tokenizer([prompt], return_tensors="pt").to(device)
 
-    with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=1024,
-            do_sample=False,
-            repetition_penalty=1.2,
-            eos_token_id=tokenizer.eos_token_id
-        )
-
-    # 仅解码新生成的 tokens，避免把 prompt 也解码出来导致解析失败
-    generated_tokens = output[0, inputs["input_ids"].shape[1]:].cpu()
-    decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
-
-    # DEBUG 输出 raw
-    print("\n----- RAW OUTPUT -----\n", decoded, "\n-----------------------\n")
-
-    # 提取 JSON
     try:
-        json_start = decoded.index("{")
-        json_end = decoded.rindex("}") + 1
-        json_str = decoded[json_start:json_end]
-        parsed = json.loads(json_str)
-        return parsed
-    except Exception:
-        # 再尝试用正则提取
-        match = re.search(r"\{[\s\S]*\}", decoded)
-        if match:
-            candidate = match.group(0)
-            try:
-                return json.loads(candidate)
-            except Exception:
-                pass
-        # 若解析失败，返回空结构
-        return {"entities": [], "relations": [], "attributes": []}
+        with torch.no_grad():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=1024,
+                do_sample=False,        # 贪婪采样
+                temperature=0.1,
+                repetition_penalty=1.1, # 防止重复
+                eos_token_id=tokenizer.eos_token_id
+            )
 
+        generated_tokens = output[0, inputs["input_ids"].shape[1]:].cpu()
+        decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+        
+        parsed = parse_json_robust(decoded)
+        return post_process_data(parsed)
+
+    except Exception as e:
+        print(f"Error during extraction: {e}")
+        return {"entities": [], "relations": [], "attributes": []}
+    finally:
+        # 清理显存 (Mac MPS 必须)
+        if device == "mps":
+            torch.mps.empty_cache()
 
 def main():
-    with open("knowledge.json", "r", encoding="utf-8") as f:
+    # 1. 读取 JSON
+    if not os.path.exists(INPUT_FILE):
+        print(f"文件 {INPUT_FILE} 不存在！")
+        return
+
+    print("正在读取 JSON 文件...")
+    with open(INPUT_FILE, "r", encoding="utf-8") as f:
         dataset = json.load(f)
 
-    output_file = open("extracted.jsonl", "w", encoding="utf-8")
+    print(f"成功加载 {len(dataset)} 条数据。开始抽取...")
+    
+    # 2. 逐条处理并写入
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f_out:
+        for item in tqdm(dataset, desc="Extraction", ncols=80):
+            extracted = extract_knowledge(item.get("context", ""))
+            
+            result = {
+                "id": item.get("id"),
+                "title": item.get("title", ""),
+                "season": item.get("season", ""),
+                "context": item.get("context", ""),
+                "extracted": extracted
+            }
+            
+            f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
+            f_out.flush()
 
-    print("开始抽取知识...")
-
-    for item in tqdm(dataset, desc="Processing", ncols=80):
-        extracted = extract_knowledge(item["context"])
-        result = {
-            "id": item["id"],
-            "title": item.get("title", ""),
-            "season": item.get("season", ""),
-            "context": item["context"],
-            "extracted": extracted
-        }
-        output_file.write(json.dumps(result, ensure_ascii=False) + "\n")
-        output_file.flush()
-
-    output_file.close()
-    print("抽取完成，结果保存在 extracted.jsonl")
-
+    print(f"完成！结果已保存至 {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()
