@@ -5,6 +5,8 @@ import os
 import time
 from urllib.parse import quote
 import re
+import shutil
+import random
 
 class SearchCrawler:
     def __init__(self):
@@ -14,6 +16,8 @@ class SearchCrawler:
         self.playwright = None
         self.browser = None
         self.context = None
+        self.zhihu_page = None  # 复用一个页面访问知乎，避免频繁新开被识别
+        self.last_zhihu_fetch = 0  # 控制知乎请求节奏
         # 二十四节气列表
         self.solar_terms = [
             '立春', '雨水', '惊蛰', '春分', '清明', '谷雨',
@@ -21,6 +25,100 @@ class SearchCrawler:
             '立秋', '处暑', '白露', '秋分', '寒露', '霜降',
             '立冬', '小雪', '大雪', '冬至', '小寒', '大寒'
         ]
+
+    def _resolve_user_data_dir(self):
+        """确定 Chromium 使用的用户数据目录，默认放在脚本同级的 browser_data_chromium"""
+        env_dir = os.environ.get('CHROMIUM_USER_DATA_DIR')
+        if env_dir:
+            env_dir = os.path.expanduser(env_dir)
+            os.makedirs(env_dir, exist_ok=True)
+            print(f"使用环境变量指定的浏览器用户数据目录: {env_dir}")
+            return env_dir
+
+        default_dir = os.path.join(os.path.dirname(__file__), 'browser_data_chromium')
+        os.makedirs(default_dir, exist_ok=True)
+        print(f"使用本地持久化浏览器数据目录: {default_dir}")
+        return default_dir
+
+    def _launch_chromium_context(self, user_data_dir):
+        """启动 Playwright 自带 Chromium 的持久化上下文"""
+        launch_kwargs = {
+            'user_data_dir': user_data_dir,
+            'headless': False,
+            'args': [
+                '--start-maximized',
+                '--disable-blink-features=AutomationControlled'
+            ],
+            'ignore_default_args': ['--enable-automation'],
+            # 模拟 Edge 143 桌面 UA，贴近可访问请求头
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
+            'locale': 'zh-CN',
+            'no_viewport': True,
+        }
+
+        try:
+            return self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+        except Exception as e:
+            print(f"✗ 启动 Chromium 持久化上下文失败: {e}")
+            if 'edge://' in str(e).lower():
+                print("  提示: 旧的浏览器数据目录可能包含 Edge 配置，建议使用全新目录。")
+
+            clean_dir = os.path.join(os.path.dirname(__file__), 'browser_data_chromium_clean')
+            if os.path.abspath(clean_dir) != os.path.abspath(user_data_dir):
+                if os.path.exists(clean_dir):
+                    shutil.rmtree(clean_dir, ignore_errors=True)
+                os.makedirs(clean_dir, exist_ok=True)
+                print(f"  将尝试使用全新数据目录: {clean_dir}")
+                launch_kwargs['user_data_dir'] = clean_dir
+                try:
+                    ctx = self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+                    print("  ✓ 全新数据目录启动成功")
+                    return ctx
+                except Exception as e2:
+                    print(f"  ✗ 全新数据目录仍然启动失败: {e2}")
+
+            raise
+    
+    def _apply_stealth(self, page):
+        """降低被识别为自动化的概率"""
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = window.chrome || { runtime: {} };
+            Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+            if (originalQuery) {
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+            }
+            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        """)
+        page.set_extra_http_headers({
+            # 贴近可访问示例请求头
+            "sec-ch-ua": '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-mobile": "?0",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6"
+        })
+    
+    def _check_zhihu_logged_in(self, page):
+        """访问知乎首页，检查是否已登录"""
+        try:
+            self._apply_stealth(page)
+            page.goto('https://www.zhihu.com', wait_until='domcontentloaded', timeout=15000)
+            time.sleep(1.5)
+            content_snippet = page.content()[:8000]
+            if '登录' not in content_snippet and 'Sign In' not in content_snippet:
+                self.zhihu_logged_in = True
+                print("✓ 检测到知乎已登录")
+                return True
+        except Exception as e:
+            print(f"⚠ 检测知乎登录状态失败: {e}")
+        return False
     
     def __enter__(self):
         """上下文管理器入口"""
@@ -35,37 +133,24 @@ class SearchCrawler:
                 storage_state = json.load(f)
             self.zhihu_logged_in = True
         
-        # 使用本地 Edge 浏览器，指定用户数据目录以保持登录状态
-        user_data_dir = os.path.join(os.path.dirname(__file__), 'browser_data')
-        os.makedirs(user_data_dir, exist_ok=True)
+        # 使用 Playwright 内置的 Chromium，持久化浏览器数据目录
+        user_data_dir = self._resolve_user_data_dir()
         
-        self.browser = self.playwright.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,  # 使用持久化的用户数据目录
-            headless=False,
-            channel="msedge",  # 使用 Edge 浏览器
-            args=['--start-maximized'],
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            locale='zh-CN',
-            no_viewport=True  # 使用窗口的实际大小
-        )
+        self.browser = self._launch_chromium_context(user_data_dir)
         
         self.context = self.browser  # 持久化上下文本身就是 context
         
-        # 检查是否已有知乎登录状态
-        if len(self.context.pages) > 0:
-            test_page = self.context.pages[0]
-        else:
-            test_page = self.context.new_page()
-        
+        # 启动时检测知乎登录状态，不足则提示一次手动登录
+        login_page = self.context.new_page()
         try:
-            test_page.goto('https://www.zhihu.com', timeout=10000)
-            time.sleep(1)
-            if '登录' not in test_page.content()[:5000]:
-                self.zhihu_logged_in = True
-                print("✓ 检测到已有知乎登录状态")
-            test_page.close()
-        except:
-            pass
+            self._apply_stealth(login_page)
+            if not self._check_zhihu_logged_in(login_page):
+                self.zhihu_login_manual(login_page, force=False)
+        finally:
+            try:
+                login_page.close()
+            except:
+                pass
         
         return self
     
@@ -167,9 +252,9 @@ class SearchCrawler:
             return True
         return False
     
-    def zhihu_login_manual(self, page):
+    def zhihu_login_manual(self, page, force=False):
         """手动登录知乎 - 暂停等待用户登录"""
-        if self.zhihu_logged_in:
+        if self.zhihu_logged_in and not force:
             return True
         
         print("\n" + "="*60)
@@ -205,15 +290,35 @@ class SearchCrawler:
     
     def fetch_page_content(self, url):
         """使用 Playwright 获取页面内容"""
-        page = self.context.new_page()
+        is_zhihu = 'zhihu.com' in url
+        page = None
         
         try:
-            is_zhihu = 'zhihu.com' in url
-            
             if is_zhihu:
                 print(f"  ⚠ 知乎链接，使用已保存的登录状态访问...")
+                if self.zhihu_page is None:
+                    self.zhihu_page = self.context.new_page()
+                page = self.zhihu_page
+                self._apply_stealth(page)
                 if not self.zhihu_logged_in:
                     self.zhihu_login_manual(page)
+                # 节流，避免短时间多次请求被风控
+                gap = 6 + random.uniform(0, 4)
+                since_last = time.time() - self.last_zhihu_fetch
+                if since_last < gap:
+                    wait_time = gap - since_last
+                    print(f"  等待 {wait_time:.1f}s 再访问知乎以降低风险...")
+                    time.sleep(wait_time)
+                self.last_zhihu_fetch = time.time()
+                # 先访问首页，再跳转目标，模拟用户浏览路径
+                try:
+                    page.goto('https://www.zhihu.com/', wait_until='domcontentloaded', timeout=20000)
+                    jitter = random.randint(500, 1200)
+                    page.wait_for_timeout(jitter)
+                except Exception:
+                    pass
+            else:
+                page = self.context.new_page()
             
             print(f"  正在访问: {url[:60]}...")
             response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
@@ -228,14 +333,35 @@ class SearchCrawler:
                 print(f"    ✗ 页面不存在（404）")
                 return ''
             elif status == 403:
-                print(f"    ✗ 访问被禁止（403）")
-                return ''
+                print(f"    ✗ 访问被禁止（403），尝试一次重试...")
+                try:
+                    page.wait_for_timeout(2000 + random.randint(0, 1500))
+                    response = page.goto(url, wait_until='domcontentloaded', timeout=30000, referer='https://www.zhihu.com/' if is_zhihu else None)
+                    if response and response.status != 403:
+                        status = response.status
+                    else:
+                        print("    ✗ 重试仍被禁止")
+                        return ''
+                except Exception:
+                    return ''
             elif status == 401:
                 print(f"    ✗ 需要身份验证（401）")
                 return ''
             
-            # 等待页面加载
-            time.sleep(2)
+            # 等待页面加载并模拟滚动
+            page.wait_for_timeout(1000 + random.randint(0, 600))
+            try:
+                page.evaluate("""() => {
+                    const h = document.body.scrollHeight || 2000;
+                    window.scrollTo(0, h * 0.35);
+                }""")
+                page.wait_for_timeout(600 + random.randint(0, 400))
+                page.evaluate("""() => {
+                    const h = document.body.scrollHeight || 2000;
+                    window.scrollTo(0, h * 0.7);
+                }""")
+            except Exception:
+                pass
             
             html = page.content()
             soup = BeautifulSoup(html, 'html.parser')
@@ -287,7 +413,7 @@ class SearchCrawler:
             content = re.sub(r'[ \t\u3000]+', ' ', content)
             
             if len(content) < 50:
-                print(f"    ⚠ 获取内容过短（{len(content)}字符），可能需要登录")
+                print(f"    ⚠ 获取内容过短（{len(content)}字符），可能需要登录或被限制")
                 return ''
             
             print(f"  ✓ 成功获取内容，长度: {len(content)}")
@@ -297,7 +423,11 @@ class SearchCrawler:
             print(f"    ✗ 获取页面内容失败: {str(e)}")
             return ''
         finally:
-            page.close()
+            if page and not is_zhihu:
+                try:
+                    page.close()
+                except Exception:
+                    pass
     
     # 知识抽取相关的函数已移除，输出仅保存页面全文到 `context`。
     
