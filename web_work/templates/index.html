@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>24节气养生知识问答</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #e8f0f3 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            padding: 30px 20px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            color: #2c3e50;
+            font-size: 28px;
+            font-weight: 500;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #7f8c8d;
+            font-size: 14px;
+        }
+
+        .chat-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            padding: 30px;
+            min-height: 500px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            max-height: 500px;
+        }
+
+        .message {
+            margin-bottom: 20px;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            text-align: right;
+        }
+
+        .message-content {
+            display: inline-block;
+            padding: 12px 18px;
+            border-radius: 10px;
+            max-width: 75%;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: #3498db;
+            color: white;
+            text-align: left;
+        }
+
+        .message.bot .message-content {
+            background: #ecf0f1;
+            color: #2c3e50;
+            text-align: left;
+        }
+
+        .message-meta {
+            font-size: 12px;
+            color: #95a5a6;
+            margin-top: 5px;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 10px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f1;
+        }
+
+        #question-input {
+            flex: 1;
+            padding: 12px 18px;
+            border: 1px solid #dce1e4;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        #question-input:focus {
+            border-color: #3498db;
+        }
+
+        button {
+            padding: 12px 30px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        button:hover:not(:disabled) {
+            background: #2980b9;
+        }
+
+        button:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            color: #7f8c8d;
+            padding: 10px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .examples {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f1;
+        }
+
+        .examples h3 {
+            font-size: 14px;
+            color: #7f8c8d;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+
+        .example-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .example-tag {
+            padding: 6px 12px;
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #495057;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .example-tag:hover {
+            background: #e9ecef;
+            border-color: #3498db;
+            color: #3498db;
+        }
+
+        .error {
+            color: #e74c3c;
+            background: #ffe5e5;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        pre {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            overflow-x: auto;
+            margin-top: 8px;
+        }
+
+        .answer-section {
+            line-height: 1.8;
+        }
+
+        .welcome {
+            text-align: center;
+            color: #7f8c8d;
+            padding: 40px 20px;
+        }
+
+        .welcome-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌿 24节气养生知识问答</h1>
+            <p class="subtitle">基于知识图谱的智能养生顾问</p>
+        </header>
+
+        <div class="chat-container">
+            <div class="messages" id="messages">
+                <div class="welcome">
+                    <div class="welcome-icon">🍵</div>
+                    <p>您好!我是24节气养生顾问</p>
+                    <p style="margin-top: 10px; font-size: 13px;">请向我咨询节气养生、饮食调理、疾病预防等问题</p>
+                </div>
+            </div>
+
+            <div class="loading" id="loading">
+                正在思考中...
+            </div>
+
+            <div class="input-area">
+                <input 
+                    type="text" 
+                    id="question-input" 
+                    placeholder="请输入您的问题,例如:立春适合吃什么?"
+                    onkeypress="handleKeyPress(event)"
+                />
+                <button onclick="askQuestion()" id="ask-btn">提问</button>
+            </div>
+
+            <div class="examples">
+                <h3>💡 示例问题</h3>
+                <div class="example-tags">
+                    <span class="example-tag" onclick="fillQuestion(this)">立春适合吃什么?</span>
+                    <span class="example-tag" onclick="fillQuestion(this)">冬至如何养生?</span>
+                    <span class="example-tag" onclick="fillQuestion(this)">春分养肝的方法</span>
+                    <span class="example-tag" onclick="fillQuestion(this)">夏至预防中暑</span>
+                    <span class="example-tag" onclick="fillQuestion(this)">秋分养生注意事项</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const messagesContainer = document.getElementById('messages');
+        const questionInput = document.getElementById('question-input');
+        const loadingIndicator = document.getElementById('loading');
+        const askBtn = document.getElementById('ask-btn');
+
+        function fillQuestion(element) {
+            questionInput.value = element.textContent;
+            questionInput.focus();
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                askQuestion();
+            }
+        }
+
+        function addMessage(content, type = 'bot', meta = '') {
+            // 移除欢迎消息
+            const welcome = messagesContainer.querySelector('.welcome');
+            if (welcome) {
+                welcome.remove();
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.innerHTML = content;
+            
+            messageDiv.appendChild(contentDiv);
+            
+            if (meta) {
+                const metaDiv = document.createElement('div');
+                metaDiv.className = 'message-meta';
+                metaDiv.textContent = meta;
+                messageDiv.appendChild(metaDiv);
+            }
+            
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        async function askQuestion() {
+            const question = questionInput.value.trim();
+            
+            if (!question) {
+                return;
+            }
+
+            // 禁用输入
+            questionInput.disabled = true;
+            askBtn.disabled = true;
+            loadingIndicator.classList.add('active');
+
+            // 显示用户问题
+            addMessage(question, 'user');
+            questionInput.value = '';
+
+            try {
+                const response = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ question })
+                });
+
+                if (!response.ok) {
+                    throw new Error('网络请求失败');
+                }
+
+                const data = await response.json();
+                
+                // 构建回答
+                let answerHtml = '<div class="answer-section">';
+                answerHtml += data.answer.replace(/\n/g, '<br>');
+                answerHtml += '</div>';
+                
+                // 添加元信息
+                let meta = `意图: ${data.intent}`;
+                if (data.entities && Object.keys(data.entities).length > 0) {
+                    const entityStr = Object.entries(data.entities)
+                        .map(([k, v]) => `${k}:${v.join(',')}`)
+                        .join(' | ');
+                    meta += ` | 实体: ${entityStr}`;
+                }
+                meta += ` | 证据数: ${data.evidence_count}`;
+                
+                addMessage(answerHtml, 'bot', meta);
+
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage(
+                    '<div class="error">抱歉,服务暂时不可用。请检查后端服务是否正常运行。</div>',
+                    'bot'
+                );
+            } finally {
+                // 恢复输入
+                questionInput.disabled = false;
+                askBtn.disabled = false;
+                loadingIndicator.classList.remove('active');
+                questionInput.focus();
+            }
+        }
+
+        // 页面加载时检查服务状态
+        window.addEventListener('load', async () => {
+            try {
+                const response = await fetch('/api/health');
+                const data = await response.json();
+                if (!data.neo4j) {
+                    console.warn('Neo4j未连接');
+                }
+            } catch (error) {
+                console.error('健康检查失败:', error);
+            }
+        });
+    </script>
+</body>
+</html>
