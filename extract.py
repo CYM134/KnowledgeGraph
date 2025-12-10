@@ -6,12 +6,12 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # --- 配置部分 ---
-MODEL_PATH = "/Users/oyzh/KnowledgeGraph/models/Qwen3-4B-Instruct-2507"
+MODEL_PATH = "E:\\hF_cache\\Qwen3-4B-Instruct-2507"
 INPUT_FILE = "knowledge.json"       # 你的输入文件 (标准 JSON 数组)
 OUTPUT_FILE = "extracted.jsonl"     # 输出文件
 
 # 检测设备
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+device = "cuda"
 print(f"Using device: {device}")
 
 # --- 模型加载 ---
