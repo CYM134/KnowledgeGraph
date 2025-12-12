@@ -268,11 +268,21 @@ def query_neo4j(cypher: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def format_answer(
-    records: List[Dict[str, Any]], question: str, intent: str, matched: List[str]
+    records: List[Dict[str, Any]],
+    intent: str,
+    matched: List[str],
+    season: str,
+    rel_keywords: List[str],
 ) -> str:
     """将图查询结果格式化为自然语言回答"""
     if not records:
-        return "抱歉，没有直接查到结果。请尝试更换关键词，例如指定节气或具体功法/食材。"
+        suggestions = []
+        if season:
+            suggestions.append(f"尝试改问“{season} + 具体食材/功法/症状”，如：{season}宜吃什么？")
+        if matched:
+            suggestions.append("换一个更具体的实体名称或疾病症状试试。")
+        tips = "；".join(suggestions) or "请尝试指定节气、食材或症状再问一次。"
+        return f"抱歉，没有直接查到结果。{tips}"
 
     if intent == "关系路径" and len(matched) >= 2:
         parts = [f"{matched[0]} 与 {matched[1]} 的关联路径:"]
@@ -281,35 +291,66 @@ def format_answer(
             parts.append(f"{idx}. {rec['source']} --{rec['relation']}--> {rec['target']}{season}")
         return "\n".join(parts)
 
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for rec in records:
+    def dedup_and_sort(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        cleaned = []
+        for r in recs:
+            key = (r.get("source", ""), r.get("relation", ""), r.get("target", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(r)
+
+        def score(r: Dict[str, Any]) -> Tuple[int, int, int]:
+            rel = r.get("relation", "")
+            tgt = r.get("target", "")
+            src = r.get("source", "")
+            sea = r.get("season", "")
+            season_hit = 0 if season and (sea == season or season in src or season in tgt) else 1
+            rel_hit = 0 if rel_keywords and any(kw in rel or kw in tgt for kw in rel_keywords) else 1
+            return (season_hit, rel_hit, len(rel))
+
+        cleaned.sort(key=score)
+        return cleaned
+
+    def render(rec: Dict[str, Any]) -> str:
         rel = rec.get("relation") or "关联"
-        grouped.setdefault(rel, []).append(rec)
+        src = rec.get("source") or ""
+        tgt = rec.get("target") or ""
+        sea = rec.get("season") or season or ""
+        season_prefix = f"{sea}：" if sea else ""
+
+        if any(k in rel for k in ["宜食", "宜"]):
+            return f"{season_prefix}{src}适合食用{tgt}"
+        if any(k in rel for k in ["忌食", "禁"]):
+            return f"{season_prefix}{src}不宜食用{tgt}"
+        if any(k in rel for k in ["预防", "治疗", "缓解", "调理"]):
+            return f"{season_prefix}{src}可用于{rel}{tgt}"
+        if "对应脏腑" in rel:
+            return f"{season_prefix}{src}主要调摄{tgt}"
+        if "对应症状" in rel:
+            return f"{season_prefix}{src}适用于{tgt}"
+        if any(k in rel for k in ["功效", "有助于", "养生", "保健"]):
+            return f"{season_prefix}{src}有助于{tgt}"
+        return f"{season_prefix}{src} —{rel}→ {tgt}"
+
+    sorted_records = dedup_and_sort(records)
 
     if intent == "饮食养生":
-        header = "为您找到与饮食养生相关的图谱证据："
+        header = "饮食养生要点："
     elif intent == "疾病调理":
-        header = "为您找到与疾病预防/调理相关的图谱证据："
+        header = "疾病预防/调理要点："
     elif intent == "节气养生":
-        header = "为您找到节气养生相关的图谱证据："
+        header = "节气养生要点："
     else:
-        header = "根据知识图谱，为您整理出以下关联信息："
+        header = "关联知识要点："
 
     lines = [header]
-    count = 0
-    for rel_type, items in list(grouped.items())[:6]:
-        if count >= 12:
-            break
-        lines.append(f"\n【{rel_type}】")
-        for item in items[:3]:
-            if count >= 12:
-                break
-            season = f" (节气: {item['season']})" if item.get("season") else ""
-            lines.append(f"- {item['source']} → {item['target']}{season}")
-            count += 1
+    for rec in sorted_records[:8]:
+        lines.append(f"- {render(rec)}")
 
-    if len(records) > count:
-        lines.append(f"\n… 还有 {len(records) - count} 条关联可继续探索。")
+    if len(sorted_records) > 8:
+        lines.append(f"… 还有 {len(sorted_records) - 8} 条关联可继续查看。")
 
     return "\n".join(lines)
 
@@ -341,6 +382,11 @@ def ask():
     intent = classify_intent(question, entities, matched)
     print(f"🎯 意图分类: {intent}")
 
+    # 2.5 额外上下文
+    season_list = entities.get("SolarTerm") or entities.get("节气") or []
+    season = season_list[0] if season_list else None
+    rel_keywords = get_rel_keywords(intent)
+
     # 3. 生成Cypher查询
     cypher, params, description = build_cypher_query(question, intent, entities, matched)
     print(f"📊 查询描述: {description}")
@@ -355,6 +401,7 @@ def ask():
     if intent == "关系路径" and not records and matched:
         season_list = entities.get("SolarTerm") or entities.get("节气") or []
         season = season_list[0] if season_list else None
+        rel_keywords = get_rel_keywords("节气养生")
         fallback_cypher, fallback_params, fallback_desc = build_neighbor_query(
             matched[0],
             season,
@@ -377,15 +424,16 @@ def ask():
     else:
         print("  (无结果)")
     print(f"{'='*60}\n")
-
+    
     # 6. 格式化答案
-    answer = format_answer(records, question, intent, matched)
+    answer = format_answer(records, intent, matched, season, rel_keywords)
 
     return jsonify({
         "question": question,
         "intent": intent,
         "entities": entities,
         "matched_entities": matched,
+        "season": season,
         "cypher": cypher,
         "params": params,
         "description": description,
