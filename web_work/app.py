@@ -122,22 +122,37 @@ def extract_entities(question: str) -> Tuple[Dict[str, List[str]], List[str]]:
 
 
 def classify_intent(question: str, entities: Dict[str, List[str]], matched: List[str]) -> str:
-    """意图分类"""
+    """意图分类 - 优先识别节气，再根据关键词确定具体意图"""
     q = question
     has_food = "FoodHerb" in entities or "饮食" in entities
     has_disease = "DiseaseSymptom" in entities or "疾病" in entities
     has_season = "SolarTerm" in entities or "节气" in entities
     relation_words = ["关系", "联系", "关联", "区别", "路径"]
 
-    if len(matched) >= 2 and any(w in q for w in relation_words):
+    # 如果用户明确要求关系路径，直接返回
+    if any(w in q for w in relation_words) and len(matched) >= 2:
         return "关系路径"
+    
+    # 如果有节气，优先判断具体意图
+    if has_season:
+        if has_food or any(kw in q for kw in ["吃", "食", "饮", "忌", "补", "膳", "菜", "药膳", "食疗"]):
+            return "饮食养生"
+        if has_disease or any(kw in q for kw in ["病", "症", "治疗", "预防", "缓解"]):
+            return "疾病调理"
+        # 节气相关的养生问题
+        if any(kw in q for kw in ["养生", "保健", "方法", "注意", "宜", "忌", "如何", "怎么", "适合", "事项"]):
+            return "节气养生"
+        # 默认也是节气养生
+        return "节气养生"
+    
+    # 无节气时的分类
     if has_food or any(kw in q for kw in ["吃", "食", "饮", "忌", "补", "膳", "菜", "药膳", "食疗"]):
         return "饮食养生"
     if has_disease or any(kw in q for kw in ["病", "症", "治疗", "预防", "调理", "缓解"]):
         return "疾病调理"
-    if len(matched) >= 2 and not has_food and not has_disease:
+    if len(matched) >= 2:
         return "关系路径"
-    if has_season or any(kw in q for kw in ["养生", "保健", "方法", "注意"]):
+    if any(kw in q for kw in ["养生", "保健", "方法", "注意"]):
         return "节气养生"
     return "通用查询"
 
@@ -278,80 +293,149 @@ def format_answer(
     if not records:
         suggestions = []
         if season:
-            suggestions.append(f"尝试改问“{season} + 具体食材/功法/症状”，如：{season}宜吃什么？")
+            suggestions.append(f"尝试改问“{season} + 具体食材/功法/症状”，例如：'{season}宜吃什么？'")
         if matched:
-            suggestions.append("换一个更具体的实体名称或疾病症状试试。")
+            suggestions.append("也可以换一个更具体的实体名称或疾病症状再问。")
         tips = "；".join(suggestions) or "请尝试指定节气、食材或症状再问一次。"
         return f"抱歉，没有直接查到结果。{tips}"
 
-    if intent == "关系路径" and len(matched) >= 2:
-        parts = [f"{matched[0]} 与 {matched[1]} 的关联路径:"]
-        for idx, rec in enumerate(records, 1):
-            season = f" (节气: {rec['season']})" if rec.get("season") else ""
-            parts.append(f"{idx}. {rec['source']} --{rec['relation']}--> {rec['target']}{season}")
-        return "\n".join(parts)
+    # 抽取并分类记录中的目标项以便生成流畅语句
+    positives: List[str] = []
+    negatives: List[str] = []
+    methods: List[str] = []
+    effects: List[str] = []
+    others: List[str] = []
 
-    def dedup_and_sort(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        seen = set()
-        cleaned = []
-        for r in recs:
-            key = (r.get("source", ""), r.get("relation", ""), r.get("target", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            cleaned.append(r)
+    food_hints = ["汤", "粥", "菜", "芽", "肉", "鱼", "蛋", "粉", "饼", "卷", "豆", "食", "果", "青菜", "韭"]
+    method_hints = ["锻炼", "运动", "导引", "保健", "养生", "按摩", "功法", "起居", "注意"]
 
-        def score(r: Dict[str, Any]) -> Tuple[int, int, int]:
-            rel = r.get("relation", "")
-            tgt = r.get("target", "")
-            src = r.get("source", "")
-            sea = r.get("season", "")
-            season_hit = 0 if season and (sea == season or season in src or season in tgt) else 1
-            rel_hit = 0 if rel_keywords and any(kw in rel or kw in tgt for kw in rel_keywords) else 1
-            return (season_hit, rel_hit, len(rel))
+    def add_unique(lst: List[str], v: str):
+        v = v.strip()
+        if not v:
+            return
+        if v not in lst:
+            lst.append(v)
 
-        cleaned.sort(key=score)
-        return cleaned
+    for rec in records:
+        rel = (rec.get("relation") or "").strip()
+        tgt = (rec.get("target") or "").strip()
+        src = (rec.get("source") or "").strip()
 
-    def render(rec: Dict[str, Any]) -> str:
-        rel = rec.get("relation") or "关联"
-        src = rec.get("source") or ""
-        tgt = rec.get("target") or ""
-        sea = rec.get("season") or season or ""
-        season_prefix = f"{sea}：" if sea else ""
+        # 优先判断 relation 中的提示词
+        if any(k in rel for k in ["宜食", "宜", "适宜", "宜吃"]):
+            add_unique(positives, tgt)
+            continue
+        if any(k in rel for k in ["忌食", "忌", "不宜"]):
+            add_unique(negatives, tgt)
+            continue
+        if any(k in rel for k in ["预防", "治疗", "缓解", "调理", "预防中暑"]):
+            add_unique(effects, tgt)
+            continue
+        if any(k in rel for k in method_hints):
+            add_unique(methods, tgt if tgt else rel)
+            continue
 
-        if any(k in rel for k in ["宜食", "宜"]):
-            return f"{season_prefix}{src}适合食用{tgt}"
-        if any(k in rel for k in ["忌食", "禁"]):
-            return f"{season_prefix}{src}不宜食用{tgt}"
-        if any(k in rel for k in ["预防", "治疗", "缓解", "调理"]):
-            return f"{season_prefix}{src}可用于{rel}{tgt}"
-        if "对应脏腑" in rel:
-            return f"{season_prefix}{src}主要调摄{tgt}"
-        if "对应症状" in rel:
-            return f"{season_prefix}{src}适用于{tgt}"
-        if any(k in rel for k in ["功效", "有助于", "养生", "保健"]):
-            return f"{season_prefix}{src}有助于{tgt}"
-        return f"{season_prefix}{src} —{rel}→ {tgt}"
+        # 否则通过 target 名判断是否可能为食物或方法
+        if any(h in tgt for h in food_hints):
+            add_unique(positives, tgt)
+            continue
+        if any(h in tgt for h in method_hints):
+            add_unique(methods, tgt)
+            continue
 
-    sorted_records = dedup_and_sort(records)
+        # 如果 relation 含导致/引起等，视为不良影响
+        if any(k in rel for k in ["导致", "引起", "可致", "易引起"]):
+            add_unique(effects, tgt)
+            continue
+
+        add_unique(others, tgt or rel)
+
+    # 识别季节标签
+    season_label = season or (records[0].get("season") or "")
+    if season_label:
+        season_prefix = f"{season_label}时节"
+    else:
+        season_prefix = "该时节"
+
+    # 根据意图生成更自然的回答
+    if intent == "节气养生":
+        parts: List[str] = []
+        # 饮食建议
+        if positives:
+            parts.append(f"{season_prefix}宜食：{ '、'.join(positives[:15]) }。")
+        # 忌口
+        if negatives:
+            parts.append(f"{season_prefix}不宜：{ '、'.join(negatives[:15]) }。")
+        # 方法建议
+        if methods:
+            parts.append(f"建议注重：{ '、'.join(methods[:10]) }，以调摄身心。")
+        # 不良影响或注意事项
+        if effects:
+            parts.append(f"需注意：可能与{ '、'.join(effects[:10]) }相关，出现不适应及时就医或调理。")
+
+        if not parts:
+            # 兜底：列出几个关键条目，但用完整句子
+            sample = (positives + methods + others)[:8]
+            if sample:
+                return f"{season_prefix}相关建议：{ '、'.join(sample) }。"
+            return f"抱歉，未能找到明确的{season_prefix}养生建议。"
+
+        header = f"{season_label}养生要点：" if season_label else "养生要点："
+        return header + "\n" + "\n".join(parts)
 
     if intent == "饮食养生":
-        header = "饮食养生要点："
-    elif intent == "疾病调理":
-        header = "疾病预防/调理要点："
-    elif intent == "节气养生":
-        header = "节气养生要点："
-    else:
-        header = "关联知识要点："
+        parts = []
+        if positives:
+            parts.append(f"宜食：{ '、'.join(positives[:20]) }。")
+        if negatives:
+            parts.append(f"忌食：{ '、'.join(negatives[:20]) }。")
+        if methods:
+            parts.append(f"搭配建议：{ '、'.join(methods[:8]) }。")
+        if parts:
+            lead = f"关于{season_label}的饮食建议：" if season_label else "饮食建议："
+            return lead + "\n" + "\n".join(parts)
+        # 兜底
+        sample = (positives + others)[:10]
+        if sample:
+            return f"建议：{ '、'.join(sample) }。"
+        return "抱歉，未找到明确的饮食建议。"
 
+    if intent == "疾病调理":
+        parts = []
+        if effects:
+            parts.append(f"在{season_label}，可能相关的症状/风险有：{ '、'.join(effects[:10]) }。")
+        if methods:
+            parts.append(f"建议采取的调理方法包括：{ '、'.join(methods[:8]) }。")
+        if positives:
+            parts.append(f"可参考的食疗/用物：{ '、'.join(positives[:12]) }。")
+        if parts:
+            header = f"{season_label}疾病预防与调理建议：" if season_label else "疾病预防与调理建议："
+            return header + "\n" + "\n".join(parts)
+        return "抱歉，未找到明确的疾病调理建议。"
+
+    # 关系路径或通用意图仍用简洁路径或要点列表
+    if intent == "关系路径" and len(matched) >= 2:
+        parts = [f"{matched[0]} 与 {matched[1]} 的关联路径："]
+        for idx, rec in enumerate(records, 1):
+            season = f"（节气：{rec.get('season','')}）" if rec.get('season') else ""
+            parts.append(f"{idx}. {rec.get('source','')} --{rec.get('relation','')}--> {rec.get('target','')}{season}")
+        return "\n".join(parts)
+
+    # 通用列举（保留之前的要点风格，但更友好）
+    header = "关联知识要点："
     lines = [header]
-    for rec in sorted_records[:8]:
-        lines.append(f"- {render(rec)}")
-
-    if len(sorted_records) > 8:
-        lines.append(f"… 还有 {len(sorted_records) - 8} 条关联可继续查看。")
-
+    seen = set()
+    for r in records[:8]:
+        src = r.get('source','')
+        rel = r.get('relation','')
+        tgt = r.get('target','')
+        key = f"{src}|{rel}|{tgt}"
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {src} {rel} {tgt}")
+    if len(records) > 8:
+        lines.append(f"… 还有 {len(records) - 8} 条关联可继续查看。")
     return "\n".join(lines)
 
 
