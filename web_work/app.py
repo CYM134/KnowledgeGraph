@@ -51,6 +51,9 @@ ENTITY_KEYWORDS = {
     "饮食": ["茶", "粥", "汤", "药膳", "食疗", "饮食", "进补", "滋补"],
     "疾病": ["咳嗽", "感冒", "腹泻", "便秘", "失眠", "头痛", "风寒", "湿热"],
     "养生": ["养生", "保健", "调理", "导引", "按摩", "针灸", "艾灸", "运动"],
+    "作息": ["睡", "睡眠", "失眠", "作息", "休息", "熬夜", "早睡", "晚睡", "午休", "睡好"],
+    "情志": ["情绪", "心情", "焦虑", "烦躁", "抑郁", "压力", "情志", "心烦", "烦闷", "放松", "安神"],
+    "运动": ["运动", "锻炼", "跑步", "散步", "拉伸", "太极", "八段锦", "气功", "瑜伽", "功法", "体操"],
 }
 
 
@@ -127,6 +130,9 @@ def classify_intent(question: str, entities: Dict[str, List[str]], matched: List
     has_food = "FoodHerb" in entities or "饮食" in entities
     has_disease = "DiseaseSymptom" in entities or "疾病" in entities
     has_season = "SolarTerm" in entities or "节气" in entities
+    has_sleep = "SleepDisorder" in entities or "作息" in entities
+    has_emotion = "Emotion" in entities or "情志" in entities
+    has_exercise = "Exercise" in entities or "运动" in entities
     relation_words = ["关系", "联系", "关联", "区别", "路径"]
 
     # 如果用户明确要求关系路径，直接返回
@@ -137,6 +143,12 @@ def classify_intent(question: str, entities: Dict[str, List[str]], matched: List
     if has_season:
         if has_food or any(kw in q for kw in ["吃", "食", "饮", "忌", "补", "膳", "菜", "药膳", "食疗"]):
             return "饮食养生"
+        if has_sleep or any(kw in q for kw in ["睡", "失眠", "作息", "休息", "熬夜", "早睡", "晚睡", "午休"]):
+            return "起居作息"
+        if has_emotion or any(kw in q for kw in ["情绪", "心情", "焦虑", "烦躁", "抑郁", "压力", "情志", "心烦", "烦闷", "放松"]):
+            return "情志调理"
+        if has_exercise or any(kw in q for kw in ["运动", "锻炼", "跑步", "散步", "拉伸", "太极", "八段锦", "气功", "瑜伽", "功法"]):
+            return "运动调理"
         if has_disease or any(kw in q for kw in ["病", "症", "治疗", "预防", "缓解"]):
             return "疾病调理"
         # 节气相关的养生问题
@@ -148,6 +160,12 @@ def classify_intent(question: str, entities: Dict[str, List[str]], matched: List
     # 无节气时的分类
     if has_food or any(kw in q for kw in ["吃", "食", "饮", "忌", "补", "膳", "菜", "药膳", "食疗"]):
         return "饮食养生"
+    if has_sleep or any(kw in q for kw in ["睡", "睡眠", "休息", "早睡", "晚睡", "午休", "规律", "调整", "起居"]):
+        return "起居作息"
+    if has_emotion or any(kw in q for kw in ["情绪", "心情", "焦虑", "烦躁", "抑郁", "压力", "情志", "心烦", "烦闷", "放松"]):
+        return "情志调理"
+    if has_exercise or any(kw in q for kw in ["运动", "锻炼", "跑步", "散步", "拉伸", "太极", "八段锦", "气功", "瑜伽", "功法"]):
+        return "运动调理"
     if has_disease or any(kw in q for kw in ["病", "症", "治疗", "预防", "调理", "缓解"]):
         return "疾病调理"
     if len(matched) >= 2:
@@ -165,6 +183,12 @@ def get_rel_keywords(intent: str) -> List[str]:
         return ["预防", "治疗", "缓解", "调理", "对应症状", "导致", "可能导致", "禁忌"]
     if intent == "节气养生":
         return ["养生", "保健", "功效", "宜", "忌", "导引", "功法", "方法", "注意", "对应时节"]
+    if intent == "起居作息":
+        return ["作息", "睡眠", "休息", "早睡", "熬夜", "规律", "调整", "起居"]
+    if intent == "情志调理":
+        return ["情志", "情绪", "心神", "安神", "静心", "舒缓", "放松"]
+    if intent == "运动调理":
+        return ["运动", "锻炼", "功法", "太极", "八段锦", "拉伸", "散步", "体操", "瑜伽"]
     return ["养生", "功效", "宜", "忌", "调理", "导引"]
 
 
@@ -363,15 +387,19 @@ def format_answer(
         # 饮食建议
         if positives:
             parts.append(f"{season_prefix}宜食：{ '、'.join(positives[:15]) }。")
+            parts.append(f"食材注意点：注重清淡、应季，{season_prefix}可优先考虑上述食材搭配。")
         # 忌口
         if negatives:
             parts.append(f"{season_prefix}不宜：{ '、'.join(negatives[:15]) }。")
+            parts.append("忌口提示：辛辣油腻或寒凉食物宜酌情减少，结合体质调整。")
         # 方法建议
         if methods:
             parts.append(f"建议注重：{ '、'.join(methods[:10]) }，以调摄身心。")
+            parts.append("实践小贴士：每日择一两项坚持执行，配合充足睡眠更佳。")
         # 不良影响或注意事项
         if effects:
             parts.append(f"需注意：可能与{ '、'.join(effects[:10]) }相关，出现不适应及时就医或调理。")
+            parts.append("观察反馈：若出现明显不适，请暂停尝试并咨询专业人士。")
 
         if not parts:
             # 兜底：列出几个关键条目，但用完整句子
@@ -387,10 +415,13 @@ def format_answer(
         parts = []
         if positives:
             parts.append(f"宜食：{ '、'.join(positives[:20]) }。")
+            parts.append("搭配建议：主粮+优质蛋白+时令蔬果，少油少盐，温热适口。")
         if negatives:
             parts.append(f"忌食：{ '、'.join(negatives[:20]) }。")
+            parts.append("若体质偏寒或脾胃虚弱，可进一步减少生冷或过辣食物。")
         if methods:
             parts.append(f"搭配建议：{ '、'.join(methods[:8]) }。")
+            parts.append("实用提示：少量多餐、细嚼慢咽，避免过饱过快。")
         if parts:
             lead = f"关于{season_label}的饮食建议：" if season_label else "饮食建议："
             return lead + "\n" + "\n".join(parts)
@@ -400,6 +431,60 @@ def format_answer(
             return f"建议：{ '、'.join(sample) }。"
         return "抱歉，未找到明确的饮食建议。"
 
+    if intent == "起居作息":
+        parts = []
+        if methods:
+            parts.append(f"作息调整建议：{ '、'.join(methods[:10]) }。")
+            parts.append("节奏提示：固定起卧时间，避免大幅度熬夜，午休不宜过久。")
+        if effects:
+            parts.append(f"需要关注的风险/症状：{ '、'.join(effects[:8]) }，出现不适建议及时休息或就医。")
+            parts.append("监测建议：若持续乏力或头痛，可适当减少刺激性饮品并增加水分。")
+        if positives:
+            parts.append(f"可辅助的食疗/用物：{ '、'.join(positives[:10]) }。")
+            parts.append("食疗小贴士：睡前少量温水或安神茶饮，避免过饱过饿。")
+        if negatives:
+            parts.append(f"不宜：{ '、'.join(negatives[:8]) }。")
+            parts.append("环境提示：睡前减少电子屏幕蓝光，保持卧室安静、温度适宜。")
+        if parts:
+            lead = f"{season_prefix}作息调养提示：" if season_label else "作息调养提示："
+            return lead + "\n" + "\n".join(parts)
+        return "抱歉，未找到明确的作息调养建议。"
+
+    if intent == "情志调理":
+        parts = []
+        if methods:
+            parts.append(f"舒缓情绪的方法：{ '、'.join(methods[:10]) }。")
+            parts.append("实践建议：每日留出10-20分钟做放松练习或深呼吸。")
+        if effects:
+            parts.append(f"需留意的情绪关联/风险：{ '、'.join(effects[:8]) }。")
+            parts.append("若情绪持续低落或影响睡眠，建议寻求专业心理支持。")
+        if positives:
+            parts.append(f"可辅助安神的食材/方式：{ '、'.join(positives[:10]) }。")
+            parts.append("饮食搭配：清淡少刺激，晚间避免咖啡因与过甜食品。")
+        if parts:
+            lead = f"{season_prefix}情志调理建议：" if season_label else "情志调理建议："
+            return lead + "\n" + "\n".join(parts)
+        return "抱歉，未找到明确的情志调理建议。"
+
+    if intent == "运动调理":
+        parts = []
+        if methods:
+            parts.append(f"推荐的运动/功法：{ '、'.join(methods[:10]) }。")
+            parts.append("执行要点：循序渐进，先热身再发力，运动后适度拉伸。")
+        if effects:
+            parts.append(f"运动时需留意：{ '、'.join(effects[:8]) }，循序渐进避免过量。")
+            parts.append("安全提醒：如有不适（胸闷、头晕、心悸），立即停止并评估体力。")
+        if positives:
+            parts.append(f"可配合的食疗/补充：{ '、'.join(positives[:10]) }。")
+            parts.append("能量补给：运动前后补充温水，适量碳水与优质蛋白。")
+        if negatives:
+            parts.append(f"不建议的搭配或动作：{ '、'.join(negatives[:8]) }。")
+            parts.append("避免事项：高温时段不宜剧烈运动，空腹或过饱状态下谨慎训练。")
+        if parts:
+            lead = f"{season_prefix}运动调理要点：" if season_label else "运动调理要点："
+            return lead + "\n" + "\n".join(parts)
+        return "抱歉，未找到明确的运动调理建议。"
+
     if intent == "疾病调理":
         parts = []
         if effects:
@@ -407,7 +492,7 @@ def format_answer(
         if methods:
             parts.append(f"建议采取的调理方法包括：{ '、'.join(methods[:8]) }。")
         if positives:
-            parts.append(f"可参考的食疗/用物：{ '、'.join(positives[:12]) }。")
+            parts.append(f"可能的病症原因：{ '、'.join(positives[:12]) }。")
         if parts:
             header = f"{season_label}疾病预防与调理建议：" if season_label else "疾病预防与调理建议："
             return header + "\n" + "\n".join(parts)
