@@ -6,6 +6,7 @@
 - 24 节气覆盖与连通情况
 - 实体邻居查看
 - 限深最短路径
+- 删除孤立节点
 
 依赖：pip install neo4j
 """
@@ -168,6 +169,50 @@ def find_path(session, source: str, target: str, depth: int, node_label: Optiona
         print(f"  {start_name} --{rel.type}--> {end_name}")
 
 
+def delete_isolated_nodes(session, node_label: Optional[str], keep_important: bool = True) -> int:
+    """删除孤立节点（可选择保留重要节点）"""
+    label_clause = f":{node_label}" if node_label else ""
+    
+    # 首先统计孤立节点数量
+    count_query = f"MATCH (n{label_clause}) WHERE NOT (n)--() RETURN count(n) AS c"
+    total_isolated = session.run(count_query).single().value()
+    
+    if total_isolated == 0:
+        print("\n删除孤立节点: 未发现孤立节点")
+        return 0
+    
+    print(f"\n删除孤立节点: 发现 {total_isolated} 个孤立节点")
+    
+    if keep_important:
+        # 保留重要标签的节点（如节气、人物、文献等）
+        important_labels = ['SolarTerm', 'Person', 'Source', 'Medicine']
+        delete_query = f"""
+        MATCH (n{label_clause})
+        WHERE NOT (n)--()
+          AND NOT any(label IN labels(n) WHERE label IN $important_labels)
+        WITH n LIMIT 1000
+        DELETE n
+        RETURN count(n) AS deleted
+        """
+        result = session.run(delete_query, important_labels=important_labels)
+        deleted = result.single()['deleted']
+        print(f"  ✓ 删除了 {deleted} 个孤立节点（保留了重要标签节点）")
+    else:
+        # 删除所有孤立节点
+        delete_query = f"""
+        MATCH (n{label_clause})
+        WHERE NOT (n)--()
+        WITH n LIMIT 1000
+        DELETE n
+        RETURN count(n) AS deleted
+        """
+        result = session.run(delete_query)
+        deleted = result.single()['deleted']
+        print(f"  ✓ 删除了 {deleted} 个孤立节点")
+    
+    return deleted
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="验证 Neo4j 中的节气养生知识图谱")
     parser.add_argument("--uri", default="neo4j+s://814e73bd.databases.neo4j.io", help="Neo4j URI")
@@ -185,6 +230,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neighbor-limit", type=int, default=20, help="邻居展示条数，默认 20")
     parser.add_argument("--top-degree", type=int, default=10, help="展示度数最高的节点数，0 表示关闭")
     parser.add_argument("--isolated-sample", type=int, default=0, help="展示孤立节点样例数，0 表示不展示")
+    parser.add_argument("--delete-isolated", action="store_true", help="删除孤立节点")
+    parser.add_argument("--delete-all-isolated", action="store_true", help="删除所有孤立节点（包括重要标签）")
     parser.add_argument("--no-summary", action="store_true", help="不输出全局概要")
     return parser.parse_args()
 
@@ -209,6 +256,21 @@ def main() -> None:
 
         if args.path:
             find_path(session, args.path[0], args.path[1], args.max_depth, args.node_label, args.name_prop)
+        
+        # 删除孤立节点功能
+        if args.delete_isolated:
+            confirm = input("\n⚠️  确认删除孤立节点（保留重要标签）？输入 'yes' 确认: ")
+            if confirm.lower() == 'yes':
+                delete_isolated_nodes(session, args.node_label, keep_important=True)
+            else:
+                print("取消删除操作")
+        
+        if args.delete_all_isolated:
+            confirm = input("\n⚠️  确认删除所有孤立节点（包括重要标签）？输入 'yes' 确认: ")
+            if confirm.lower() == 'yes':
+                delete_isolated_nodes(session, args.node_label, keep_important=False)
+            else:
+                print("取消删除操作")
 
     driver.close()
 
