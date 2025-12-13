@@ -386,7 +386,7 @@ def format_answer(
         parts: List[str] = []
         # 饮食建议
         if positives:
-            parts.append(f"{season_prefix}宜食：{ '、'.join(positives[:15]) }。")
+            parts.append(f"{season_prefix}适宜：{ '、'.join(positives[:15]) }。")
             parts.append(f"食材注意点：注重清淡、应季，{season_prefix}可优先考虑上述食材搭配。")
         # 忌口
         if negatives:
@@ -394,7 +394,7 @@ def format_answer(
             parts.append("忌口提示：辛辣油腻或寒凉食物宜酌情减少，结合体质调整。")
         # 方法建议
         if methods:
-            parts.append(f"建议注重：{ '、'.join(methods[:10]) }，以调摄身心。")
+            parts.append(f"建议注重：{ '、'.join(methods[:10]) }，以修养身心。")
             parts.append("实践小贴士：每日择一两项坚持执行，配合充足睡眠更佳。")
         # 不良影响或注意事项
         if effects:
