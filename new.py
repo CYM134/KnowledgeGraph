@@ -54,22 +54,18 @@ def run_spider():
         "--no-sandbox",
         "--disable-infobars",
     ]
-
+    
     with sync_playwright() as p:
-        # 启动浏览器 (headless=False 方便观察，稳定后可改为 True)
         browser = p.chromium.launch(
             headless=False,  
             args=launch_args
-        )
-        
-        # 创建上下文
+        )    
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
             locale="zh-CN"
         )
-
-        # 注入反爬绕过脚本 (Stealth)
+        # 注入反爬绕过(Stealth)
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
