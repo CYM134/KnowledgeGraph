@@ -168,6 +168,17 @@ def polish_answer_with_modelscope(question: str, draft_answer: str) -> str:
         polished = completion.choices[0].message.content or ""
         polished = polished.strip()
         if polished:
+            # 调试输出：在后端终端打印原始输入与润色后的结果（不输出密钥）
+            try:
+                print("🔧 ModelScope 调用成功：开始输出润色调试信息")
+                print("--- 原始草稿 (draft) ---")
+                print(draft_answer)
+                print("--- 润色后结果 (polished) ---")
+                print(polished)
+                print("🔧 ModelScope 调用成功：润色信息结束")
+            except Exception as _:
+                # 打印调试信息时不可影响主流程
+                pass
             return polished
     except Exception as exc:
         print(f"⚠️ 调用润色接口失败: {exc}")
