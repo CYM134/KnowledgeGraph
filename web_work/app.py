@@ -5,6 +5,7 @@
 
 import csv
 import os
+import re
 from typing import Any, Dict, List, Tuple
 
 from flask import Flask, jsonify, render_template, request
@@ -22,6 +23,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
 ENTITY_CSV_PATH = os.path.join(DATA_DIR, "entity_types.csv")
 RELATION_CSV_PATH = os.path.join(DATA_DIR, "relations_with_season.csv")
+
+# ModelScope 配置（用于答案润色）
+# 如需更换模型或 Key，直接修改此处的常量即可。
+MODELSCOPE_API_BASE = "https://api-inference.modelscope.cn/v1"
+MODELSCOPE_MODEL = "Qwen/Qwen3-4B"
+MODELSCOPE_API_KEY = "ms-88719a8c-c747-4ec8-8325-0ba34cad969b"
 
 # 本地词表
 ENTITY_VOCAB: List[Tuple[str, str]] = []  # [(name, label)]
@@ -57,6 +64,32 @@ ENTITY_KEYWORDS = {
 }
 
 
+def is_nonsense_question(question: str) -> bool:
+    """简单判定是否为无效/无厘头提问"""
+    text = (question or "").strip()
+    if not text:
+        return True
+
+    # 去掉空白和常见符号，只留下中英文与数字
+    core = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", text)
+    if not core:
+        return True
+
+    # 仅单个字符或全部重复字符，视为无效
+    if len(core) <= 1:
+        return True
+    if len(set(core)) == 1 and len(core) <= 5:
+        return True
+
+    # 无中文且无字母，视为无效
+    has_cjk = re.search(r"[\u4e00-\u9fff]", core)
+    has_alpha = re.search(r"[A-Za-z]", core)
+    if not has_cjk and not has_alpha:
+        return True
+
+    return False
+
+
 def load_local_lexicon() -> None:
     """加载实体/关系词表，便于问句匹配"""
     global ENTITY_VOCAB, NAME_TO_LABEL, RELATION_TYPES
@@ -90,6 +123,56 @@ def load_local_lexicon() -> None:
         print(f"✓ 载入关系类型 {len(RELATION_TYPES)} 种")
     else:
         print(f"⚠️ 未找到关系文件: {RELATION_CSV_PATH}")
+
+
+def polish_answer_with_modelscope(question: str, draft_answer: str) -> str:
+    """调用 ModelScope 接口对答案进行润色，失败则回退原答案"""
+    if not draft_answer:
+        return draft_answer
+
+    if not MODELSCOPE_API_KEY:
+        print("⚠️ ModelScope API key 未配置，跳过润色。")
+        return draft_answer
+
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        print(f"⚠️ ModelScope 客户端不可用: {exc}")
+        return draft_answer
+
+    try:
+        client = OpenAI(base_url=MODELSCOPE_API_BASE, api_key=MODELSCOPE_API_KEY)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是二十四节气养生知识问答的润色助手，在不新增事实的前提下让回答更流畅、"
+                    "更简洁，保持条理清晰，避免凭空添加新信息。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"用户问题：{question}\n"
+                    f"原始回答：{draft_answer}\n"
+                    "请润色回答，避免引入新事实。"
+                ),
+            },
+        ]
+
+        completion = client.chat.completions.create(
+            model=MODELSCOPE_MODEL,
+            messages=messages,
+            extra_body={"enable_thinking": False},
+        )
+        polished = completion.choices[0].message.content or ""
+        polished = polished.strip()
+        if polished:
+            return polished
+    except Exception as exc:
+        print(f"⚠️ 调用润色接口失败: {exc}")
+
+    return draft_answer
 
 
 def extract_entities(question: str) -> Tuple[Dict[str, List[str]], List[str]]:
@@ -315,13 +398,7 @@ def format_answer(
 ) -> str:
     """将图查询结果格式化为自然语言回答"""
     if not records:
-        suggestions = []
-        if season:
-            suggestions.append(f"尝试改问“{season} + 具体食材/功法/症状”，例如：'{season}宜吃什么？'")
-        if matched:
-            suggestions.append("也可以换一个更具体的实体名称或疾病症状再问。")
-        tips = "；".join(suggestions) or "请尝试指定节气、食材或症状再问一次。"
-        return f"抱歉，没有直接查到结果。{tips}"
+        return "抱歉，请正确说明您的问题。"
 
     # 抽取并分类记录中的目标项以便生成流畅语句
     positives: List[str] = []
@@ -391,15 +468,12 @@ def format_answer(
         # 忌口
         if negatives:
             parts.append(f"{season_prefix}不宜：{ '、'.join(negatives[:15]) }。")
-            parts.append("忌口提示：辛辣油腻或寒凉食物宜酌情减少，结合体质调整。")
         # 方法建议
         if methods:
             parts.append(f"建议注重：{ '、'.join(methods[:10]) }，以修养身心。")
-            parts.append("实践小贴士：每日择一两项坚持执行，配合充足睡眠更佳。")
         # 不良影响或注意事项
         if effects:
             parts.append(f"需注意：可能与{ '、'.join(effects[:10]) }相关，出现不适应及时就医或调理。")
-            parts.append("观察反馈：若出现明显不适，请暂停尝试并咨询专业人士。")
 
         if not parts:
             # 兜底：列出几个关键条目，但用完整句子
@@ -415,13 +489,10 @@ def format_answer(
         parts = []
         if positives:
             parts.append(f"宜食：{ '、'.join(positives[:20]) }。")
-            parts.append("搭配建议：主粮+优质蛋白+时令蔬果，少油少盐，温热适口。")
         if negatives:
             parts.append(f"忌食：{ '、'.join(negatives[:20]) }。")
-            parts.append("若体质偏寒或脾胃虚弱，可进一步减少生冷或过辣食物。")
         if methods:
             parts.append(f"搭配建议：{ '、'.join(methods[:8]) }。")
-            parts.append("实用提示：少量多餐、细嚼慢咽，避免过饱过快。")
         if parts:
             lead = f"关于{season_label}的饮食建议：" if season_label else "饮食建议："
             return lead + "\n" + "\n".join(parts)
@@ -435,16 +506,12 @@ def format_answer(
         parts = []
         if methods:
             parts.append(f"作息调整建议：{ '、'.join(methods[:10]) }。")
-            parts.append("节奏提示：固定起卧时间，避免大幅度熬夜，午休不宜过久。")
         if effects:
             parts.append(f"需要关注的风险/症状：{ '、'.join(effects[:8]) }，出现不适建议及时休息或就医。")
-            parts.append("监测建议：若持续乏力或头痛，可适当减少刺激性饮品并增加水分。")
         if positives:
             parts.append(f"可辅助的食疗/用物：{ '、'.join(positives[:10]) }。")
-            parts.append("食疗小贴士：睡前少量温水或安神茶饮，避免过饱过饿。")
         if negatives:
             parts.append(f"不宜：{ '、'.join(negatives[:8]) }。")
-            parts.append("环境提示：睡前减少电子屏幕蓝光，保持卧室安静、温度适宜。")
         if parts:
             lead = f"{season_prefix}作息调养提示：" if season_label else "作息调养提示："
             return lead + "\n" + "\n".join(parts)
@@ -454,13 +521,10 @@ def format_answer(
         parts = []
         if methods:
             parts.append(f"舒缓情绪的方法：{ '、'.join(methods[:10]) }。")
-            parts.append("实践建议：每日留出10-20分钟做放松练习或深呼吸。")
         if effects:
             parts.append(f"需留意的情绪关联/风险：{ '、'.join(effects[:8]) }。")
-            parts.append("若情绪持续低落或影响睡眠，建议寻求专业心理支持。")
         if positives:
             parts.append(f"可辅助安神的食材/方式：{ '、'.join(positives[:10]) }。")
-            parts.append("饮食搭配：清淡少刺激，晚间避免咖啡因与过甜食品。")
         if parts:
             lead = f"{season_prefix}情志调理建议：" if season_label else "情志调理建议："
             return lead + "\n" + "\n".join(parts)
@@ -470,16 +534,12 @@ def format_answer(
         parts = []
         if methods:
             parts.append(f"推荐的运动/功法：{ '、'.join(methods[:10]) }。")
-            parts.append("执行要点：循序渐进，先热身再发力，运动后适度拉伸。")
         if effects:
             parts.append(f"运动时需留意：{ '、'.join(effects[:8]) }，循序渐进避免过量。")
-            parts.append("安全提醒：如有不适（胸闷、头晕、心悸），立即停止并评估体力。")
         if positives:
             parts.append(f"可配合的食疗/补充：{ '、'.join(positives[:10]) }。")
-            parts.append("能量补给：运动前后补充温水，适量碳水与优质蛋白。")
         if negatives:
             parts.append(f"不建议的搭配或动作：{ '、'.join(negatives[:8]) }。")
-            parts.append("避免事项：高温时段不宜剧烈运动，空腹或过饱状态下谨慎训练。")
         if parts:
             lead = f"{season_prefix}运动调理要点：" if season_label else "运动调理要点："
             return lead + "\n" + "\n".join(parts)
@@ -539,6 +599,22 @@ def ask():
     if not question:
         return jsonify({"error": "问题不能为空"}), 400
 
+    if is_nonsense_question(question):
+        msg = "抱歉，请正确说明您的问题。"
+        return jsonify({
+            "question": question,
+            "intent": "无效提问",
+            "entities": {},
+            "matched_entities": [],
+            "season": None,
+            "cypher": "",
+            "params": {},
+            "description": "无效提问，未执行查询",
+            "evidence_count": 0,
+            "answer": msg,
+            "answer_raw": msg,
+        })
+
     print(f"\n{'='*60}")
     print(f"📝 用户问题: {question}")
 
@@ -546,6 +622,23 @@ def ask():
     entities, matched = extract_entities(question)
     print(f"🔍 提取实体: {matched}")
     print(f"   实体映射: {entities}")
+
+    # 若未匹配到任何有效实体/关键词，直接返回提示
+    if not matched:
+        msg = "抱歉，请正确说明您的问题。"
+        return jsonify({
+            "question": question,
+            "intent": "无效提问",
+            "entities": entities,
+            "matched_entities": matched,
+            "season": None,
+            "cypher": "",
+            "params": {},
+            "description": "未匹配到有效实体，未执行查询",
+            "evidence_count": 0,
+            "answer": msg,
+            "answer_raw": msg,
+        })
 
     # 2. 意图分类
     intent = classify_intent(question, entities, matched)
@@ -566,24 +659,6 @@ def ask():
     records = query_neo4j(cypher, params)
     print(f"✓ 查询到 {len(records)} 条结果")
 
-    # 如果是关系路径但未命中，回退到邻居查询
-    if intent == "关系路径" and not records and matched:
-        season_list = entities.get("SolarTerm") or entities.get("节气") or []
-        season = season_list[0] if season_list else None
-        rel_keywords = get_rel_keywords("节气养生")
-        fallback_cypher, fallback_params, fallback_desc = build_neighbor_query(
-            matched[0],
-            season,
-            get_rel_keywords("节气养生"),
-        )
-        print("⚠️ 未找到路径，改为邻居查询")
-        print(f"📊 回退描述: {fallback_desc}")
-        print(f"💾 回退Cypher:\n{fallback_cypher}")
-        print(f"🔧 回退参数: {fallback_params}")
-        cypher, params, description = fallback_cypher, fallback_params, fallback_desc
-        records = query_neo4j(cypher, params)
-        print(f"✓ 回退后查询到 {len(records)} 条结果")
-
     # 5. 输出结构化证据
     print(f"\n{'='*60}")
     print("📋 结构化证据链:")
@@ -596,6 +671,7 @@ def ask():
     
     # 6. 格式化答案
     answer = format_answer(records, intent, matched, season, rel_keywords)
+    polished_answer = polish_answer_with_modelscope(question, answer)
 
     return jsonify({
         "question": question,
@@ -607,7 +683,8 @@ def ask():
         "params": params,
         "description": description,
         "evidence_count": len(records),
-        "answer": answer
+        "answer": polished_answer,
+        "answer_raw": answer
     })
 
 
