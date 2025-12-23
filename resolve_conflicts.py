@@ -1,16 +1,4 @@
-"""
-检查并消解 Neo4j 知识图谱中的数据冲突。
-
-冲突类型：
-1. 重复节点：同名但标签不同的节点
-2. 自环关系：节点指向自己的关系
-3. 重复关系：相同源、目标、类型的多条关系
-4. 孤立节点：没有任何关系的节点
-5. 不一致的关系属性：相同关系但属性值不同
-6. 命名冲突：名称相似但有细微差别（空格、标点等）
-
-依赖：pip install neo4j
-"""
+"""检查并消解 Neo4j 知识图谱冲突。"""
 
 import argparse
 import os
@@ -27,11 +15,8 @@ class ConflictResolver:
     
     def close(self):
         self.driver.close()
-    
-    # ========== 冲突检测 ==========
-    
+
     def find_duplicate_nodes(self, session) -> List[Dict]:
-        """查找同名但标签不同的重复节点"""
         print("\n【检查1】查找重复节点（同名不同标签）...")
         query = """
         MATCH (n)
@@ -61,7 +46,6 @@ class ConflictResolver:
         return results
     
     def find_self_loops(self, session) -> List[Dict]:
-        """查找自环关系"""
         print("\n【检查2】查找自环关系...")
         query = """
         MATCH (n)-[r]->(n)
@@ -88,7 +72,6 @@ class ConflictResolver:
         return results
     
     def find_duplicate_relations(self, session) -> List[Dict]:
-        """查找重复关系（相同源、目标、类型）"""
         print("\n【检查3】查找重复关系...")
         query = """
         MATCH (s)-[r]->(t)
@@ -121,7 +104,6 @@ class ConflictResolver:
         return results
     
     def find_isolated_nodes(self, session) -> List[Dict]:
-        """查找孤立节点"""
         print("\n【检查4】查找孤立节点...")
         query = """
         MATCH (n)
@@ -149,7 +131,6 @@ class ConflictResolver:
         return results
     
     def find_naming_conflicts(self, session) -> List[Dict]:
-        """查找命名冲突（名称相似但有细微差别）"""
         print("\n【检查5】查找命名冲突（空格、标点等）...")
         query = """
         MATCH (n)
@@ -187,7 +168,6 @@ class ConflictResolver:
         return results
     
     def find_inconsistent_relation_properties(self, session) -> List[Dict]:
-        """查找不一致的关系属性"""
         print("\n【检查6】查找关系属性不一致...")
         query = """
         MATCH (s)-[r]->(t)
@@ -217,11 +197,8 @@ class ConflictResolver:
             print("  ✓ 未发现关系属性不一致")
         
         return results
-    
-    # ========== 冲突消解 ==========
-    
+
     def merge_duplicate_nodes(self, session, dry_run: bool = True) -> int:
-        """合并重复节点（保留所有标签）"""
         print("\n【消解1】合并重复节点...")
         duplicates = self.find_duplicate_nodes(session)
         
@@ -236,7 +213,6 @@ class ConflictResolver:
             if dry_run:
                 print(f"  [模拟] 将合并节点 '{name}' 的 {len(ids)} 个副本")
             else:
-                # 合并策略：保留第一个节点，将其他节点的关系转移，然后删除
                 query = """
                 MATCH (nodes)
                 WHERE id(nodes) IN $ids
@@ -265,7 +241,6 @@ class ConflictResolver:
                 DETACH DELETE dup
                 RETURN count(dup) AS merged
                 """
-                # 注意：上述查询需要 APOC 插件，简化版本：
                 simple_query = """
                 MATCH (nodes)
                 WHERE id(nodes) IN $ids
@@ -293,7 +268,6 @@ class ConflictResolver:
                 WITH keeper, dup
                 DETACH DELETE dup
                 """
-                # 最简化版本（可能丢失部分信息）
                 basic_query = """
                 MATCH (nodes)
                 WHERE id(nodes) IN $ids
@@ -318,7 +292,6 @@ class ConflictResolver:
         return count
     
     def remove_self_loops(self, session, dry_run: bool = True) -> int:
-        """删除自环关系"""
         print("\n【消解2】删除自环关系...")
         self_loops = self.find_self_loops(session)
         
@@ -340,7 +313,6 @@ class ConflictResolver:
         return count
     
     def merge_duplicate_relations(self, session, dry_run: bool = True) -> int:
-        """合并重复关系（保留属性）"""
         print("\n【消解3】合并重复关系...")
         duplicates = self.find_duplicate_relations(session)
         
@@ -348,7 +320,7 @@ class ConflictResolver:
             return 0
         
         count = 0
-        for dup in duplicates[:100]:  # 限制处理数量
+        for dup in duplicates[:100]:
             source = dup['source']
             target = dup['target']
             rel_type = dup['rel_type']
@@ -356,7 +328,6 @@ class ConflictResolver:
             if dry_run:
                 print(f"  [模拟] 将合并关系: '{source}' --{rel_type}--> '{target}' (×{dup['count']})")
             else:
-                # 保留第一个关系，删除其余
                 query = f"""
                 MATCH (s {{name: $source}})-[r:`{rel_type}`]->(t {{name: $target}})
                 WITH s, t, collect(r) AS rels
@@ -381,7 +352,6 @@ class ConflictResolver:
         return count
     
     def remove_isolated_nodes(self, session, dry_run: bool = True, keep_important: bool = True) -> int:
-        """删除孤立节点（可选择保留重要节点）"""
         print("\n【消解4】删除孤立节点...")
         isolated = self.find_isolated_nodes(session)
         
@@ -393,7 +363,6 @@ class ConflictResolver:
             return 0
         
         if keep_important:
-            # 保留重要标签的节点（如节气、人物等）
             important_labels = ['SolarTerm', 'Person', 'Source']
             query = """
             MATCH (n)
@@ -417,7 +386,6 @@ class ConflictResolver:
         return count
     
     def normalize_node_names(self, session, dry_run: bool = True) -> int:
-        """规范化节点名称（去除空格、统一标点）"""
         print("\n【消解5】规范化节点名称...")
         conflicts = self.find_naming_conflicts(session)
         
@@ -430,9 +398,8 @@ class ConflictResolver:
         
         count = 0
         for conf in conflicts:
-            # 选择最常见或最短的名称作为标准
             variants = conf['variants']
-            canonical = min(variants, key=len)  # 使用最短的名称
+            canonical = min(variants, key=len)
             
             for variant in variants:
                 if variant != canonical:
@@ -453,7 +420,6 @@ class ConflictResolver:
         return count
     
     def unify_relation_properties(self, session, dry_run: bool = True) -> int:
-        """统一关系属性（选择最常见的值）"""
         print("\n【消解6】统一关系属性...")
         inconsistent = self.find_inconsistent_relation_properties(session)
         
@@ -471,7 +437,6 @@ class ConflictResolver:
             rel_type = item['rel_type']
             seasons = item['seasons']
             
-            # 选择非"未知"的值，或最常见的值
             canonical = next((s for s in seasons if s and s != '未知'), seasons[0])
             
             query = f"""
@@ -488,11 +453,8 @@ class ConflictResolver:
         
         print(f"  ✓ 完成统一，更新了 {count} 个关系")
         return count
-    
-    # ========== 主流程 ==========
-    
+
     def check_all_conflicts(self):
-        """检查所有冲突"""
         print("\n" + "="*60)
         print("开始检查数据库冲突...")
         print("="*60)
@@ -510,7 +472,6 @@ class ConflictResolver:
         print("="*60)
     
     def resolve_all_conflicts(self, dry_run: bool = True):
-        """消解所有冲突"""
         print("\n" + "="*60)
         if dry_run:
             print("开始模拟消解冲突（不会修改数据）...")
@@ -521,23 +482,15 @@ class ConflictResolver:
         total_changes = 0
         
         with self.driver.session() as session:
-            # 1. 删除自环关系
             total_changes += self.remove_self_loops(session, dry_run)
-            
-            # 2. 合并重复关系
+
             total_changes += self.merge_duplicate_relations(session, dry_run)
-            
-            # 3. 统一关系属性
+
             total_changes += self.unify_relation_properties(session, dry_run)
-            
-            # 4. 规范化节点名称
+
             total_changes += self.normalize_node_names(session, dry_run)
-            
-            # 5. 合并重复节点
+
             total_changes += self.merge_duplicate_nodes(session, dry_run)
-            
-            # 6. 删除孤立节点（可选）
-            # total_changes += self.remove_isolated_nodes(session, dry_run)
         
         print("\n" + "="*60)
         if dry_run:
@@ -574,10 +527,8 @@ def main() -> None:
     
     try:
         if args.check_only:
-            # 仅检查
             resolver.check_all_conflicts()
         else:
-            # 检查并消解
             resolver.check_all_conflicts()
             resolver.resolve_all_conflicts(dry_run=not args.execute)
     finally:

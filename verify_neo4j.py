@@ -1,15 +1,4 @@
-"""
-验证 Neo4j 中的 24 节气养生知识图谱是否可用。
-
-检查项：
-- 节点/关系规模、标签/关系类型 TopN
-- 24 节气覆盖与连通情况
-- 实体邻居查看
-- 限深最短路径
-- 删除孤立节点
-
-依赖：pip install neo4j
-"""
+"""验证 Neo4j 中的节气养生知识图谱。"""
 
 import argparse
 import os
@@ -170,10 +159,8 @@ def find_path(session, source: str, target: str, depth: int, node_label: Optiona
 
 
 def delete_isolated_nodes(session, node_label: Optional[str], keep_important: bool = True) -> int:
-    """删除孤立节点（可选择保留重要节点）"""
     label_clause = f":{node_label}" if node_label else ""
     
-    # 首先统计孤立节点数量
     count_query = f"MATCH (n{label_clause}) WHERE NOT (n)--() RETURN count(n) AS c"
     total_isolated = session.run(count_query).single().value()
     
@@ -184,7 +171,6 @@ def delete_isolated_nodes(session, node_label: Optional[str], keep_important: bo
     print(f"\n删除孤立节点: 发现 {total_isolated} 个孤立节点")
     
     if keep_important:
-        # 保留重要标签的节点（如节气、人物、文献等）
         important_labels = ['SolarTerm', 'Person', 'Source', 'Medicine']
         delete_query = f"""
         MATCH (n{label_clause})
@@ -198,7 +184,6 @@ def delete_isolated_nodes(session, node_label: Optional[str], keep_important: bo
         deleted = result.single()['deleted']
         print(f"  ✓ 删除了 {deleted} 个孤立节点（保留了重要标签节点）")
     else:
-        # 删除所有孤立节点
         delete_query = f"""
         MATCH (n{label_clause})
         WHERE NOT (n)--()
@@ -257,7 +242,6 @@ def main() -> None:
         if args.path:
             find_path(session, args.path[0], args.path[1], args.max_depth, args.node_label, args.name_prop)
         
-        # 删除孤立节点功能
         if args.delete_isolated:
             confirm = input("\n⚠️  确认删除孤立节点（保留重要标签）？输入 'yes' 确认: ")
             if confirm.lower() == 'yes':

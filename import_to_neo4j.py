@@ -1,8 +1,4 @@
-"""
-将 entity_types.csv 和 relations_with_season.csv 导入到 Neo4j 数据库。
-
-依赖：pip install neo4j
-"""
+"""将 entity_types.csv 和 relations_with_season.csv 导入 Neo4j。"""
 
 import argparse
 import csv
@@ -14,7 +10,6 @@ from neo4j.exceptions import ServiceUnavailable
 
 
 def load_entities(csv_path: str) -> List[Tuple[str, str]]:
-    """加载实体数据：(name, label)"""
     entities = []
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -27,7 +22,6 @@ def load_entities(csv_path: str) -> List[Tuple[str, str]]:
 
 
 def load_relations(csv_path: str) -> List[Dict[str, str]]:
-    """加载关系数据：{source, target, type, season}"""
     relations = []
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -47,10 +41,8 @@ def load_relations(csv_path: str) -> List[Dict[str, str]]:
 
 
 def create_entities(session, entities: List[Tuple[str, str]], batch_size: int = 500) -> None:
-    """批量创建实体节点"""
     print(f"开始导入 {len(entities)} 个实体节点...")
     
-    # 按标签分组
     label_groups: Dict[str, List[str]] = {}
     for name, label in entities:
         if label not in label_groups:
@@ -75,10 +67,8 @@ def create_entities(session, entities: List[Tuple[str, str]], batch_size: int = 
 
 
 def create_relations(session, relations: List[Dict[str, str]], batch_size: int = 500) -> None:
-    """批量创建关系"""
     print(f"\n开始导入 {len(relations)} 条关系...")
     
-    # 按关系类型分组
     type_groups: Dict[str, List[Dict[str, str]]] = {}
     for rel in relations:
         rel_type = rel['type']
@@ -88,13 +78,11 @@ def create_relations(session, relations: List[Dict[str, str]], batch_size: int =
     
     total = 0
     for rel_type, rels in type_groups.items():
-        # 将关系类型转换为合法的 Cypher 标识符（去除特殊字符）
         safe_type = ''.join(c if c.isalnum() or c in ['_'] else '_' for c in rel_type)
         print(f"  导入关系类型 '{rel_type}': {len(rels)} 条")
         
         for i in range(0, len(rels), batch_size):
             batch = rels[i:i + batch_size]
-            # 使用 MERGE 避免重复关系
             query = f"""
             UNWIND $rels AS rel
             MATCH (s {{name: rel.source}})
@@ -112,10 +100,8 @@ def create_relations(session, relations: List[Dict[str, str]], batch_size: int =
 
 
 def create_indexes(session) -> None:
-    """创建索引以提高查询性能"""
     print("\n创建索引...")
     
-    # 为所有可能的标签创建索引
     labels = ['Person', 'Source', 'Technique', 'Concept', 'SolarTerm', 
               'OrgLocation', 'TimeSeason', 'Symptom', 'Food', 'Medicine']
     
@@ -129,14 +115,12 @@ def create_indexes(session) -> None:
 
 
 def clear_database(session) -> None:
-    """清空数据库（慎用！）"""
     print("警告：正在清空数据库...")
     session.run("MATCH (n) DETACH DELETE n")
     print("✓ 数据库已清空")
 
 
 def verify_import(session) -> None:
-    """验证导入结果"""
     print("\n验证导入结果...")
     
     node_count = session.run("MATCH (n) RETURN count(n) AS c").single()['c']
@@ -180,7 +164,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     
-    # 检查文件是否存在
     if not os.path.exists(args.entities):
         print(f"错误：实体文件不存在: {args.entities}")
         return
@@ -188,13 +171,11 @@ def main() -> None:
         print(f"错误：关系文件不存在: {args.relations}")
         return
     
-    # 加载数据
     print("加载数据文件...")
     entities = load_entities(args.entities)
     relations = load_relations(args.relations)
     print(f"✓ 加载完成: {len(entities)} 个实体, {len(relations)} 条关系")
     
-    # 连接数据库
     print(f"\n连接到 Neo4j: {args.uri}")
     try:
         driver = GraphDatabase.driver(args.uri, auth=(args.user, args.password or None))
@@ -203,21 +184,16 @@ def main() -> None:
         return
     
     with driver.session() as session:
-        # 清空数据库（可选）
         if args.clear:
             clear_database(session)
         
-        # 创建索引
         if not args.skip_indexes:
             create_indexes(session)
         
-        # 导入实体
         create_entities(session, entities, args.batch_size)
         
-        # 导入关系
         create_relations(session, relations, args.batch_size)
         
-        # 验证
         verify_import(session)
     
     driver.close()

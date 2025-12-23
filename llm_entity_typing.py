@@ -5,13 +5,10 @@ import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# ================= 配置区域 =================
-# 请确保路径正确
 MODEL_PATH = "/Users/oyzh/KnowledgeGraph/models/Qwen3-4B-Instruct-2507" 
-INPUT_FILE = "knowledge.json"  # 你的原始数据文件
-OUTPUT_CSV = "entity_types.csv" # 最终输出的节点表
+INPUT_FILE = "knowledge.json"
+OUTPUT_CSV = "entity_types.csv"
 
-# 定义 Schema (分类标准)
 SCHEMA_DESC = """
 请从文本中提取以下类别的实体，并直接标记类别：
 1. SolarTerm (节气): 24节气名称
@@ -27,12 +24,9 @@ SCHEMA_DESC = """
 11. Other (其他): 有意义但无法归类的实体
 """
 
-# 检测设备
 device = "mps" if torch.backends.mps.is_available() else "cpu"
-# device = "cuda" # 如果是 NVIDIA 显卡请解开这行
 print(f"Using device: {device}")
 
-# ================= 1. 模型加载 =================
 print("Loading model...")
 try:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
@@ -48,15 +42,9 @@ except Exception as e:
     print(f"Error loading model: {e}")
     exit()
 
-# ================= 2. 核心提取函数 =================
-
 def extract_entities_from_text(text):
-    """
-    输入一段文本，输出提取到的实体列表 [{"name": "...", "label": "..."}, ...]
-    """
     if not text or len(text) < 5: return []
 
-    # Few-Shot 示例 (使用民俗生活场景，防止污染中医数据)
     few_shot = """
 示例输入：
 "冬至这天，北京市民张大爷在菜市场买了羊肉和白萝卜，回家给孙子包了顿饺子。俗话说‘冬至不端饺子碗，冻掉耳朵没人管’，一家人吃得很开心。"
@@ -75,7 +63,6 @@ def extract_entities_from_text(text):
     {{"name": "耳朵", "label": "BodyPart"}}
 ]"""
 
-    # System Prompt (加入防抄袭约束)
     system_prompt = f"""你是一个中医知识图谱构建助手。
 {SCHEMA_DESC}
 
@@ -107,7 +94,6 @@ def extract_entities_from_text(text):
         
         response = tokenizer.decode(output[0][len(inputs.input_ids[0]):], skip_special_tokens=True).strip()
         
-        # 简单的 JSON 提取逻辑
         json_str = response
         if "```json" in response:
             json_str = response.split("```json")[1].split("```")[0]
@@ -120,17 +106,13 @@ def extract_entities_from_text(text):
         return []
         
     except Exception as e:
-        # print(f"Warning: Parse error - {e}")
         return []
-
-# ================= 3. 主流程 (实时写入版) =================
 
 def main():
     if not os.path.exists(INPUT_FILE):
         print(f"Error: {INPUT_FILE} not found.")
         return
 
-    # 1. 读取数据
     with open(INPUT_FILE, "r", encoding="utf-8") as f:
         try:
             data = json.load(f)
@@ -141,35 +123,27 @@ def main():
 
     print(f"Loaded {len(data)} documents. Starting extraction...")
     
-    # 2. 准备实时写入
-    # 使用 'seen_entities' 集合在内存中进行去重
     seen_entities = set()
     
-    # 检查文件是否存在，决定是否写表头（支持断点续传的简单逻辑）
     file_exists = os.path.exists(OUTPUT_CSV)
     
-    # 打开 CSV 文件准备写入 (使用 'a' 模式追加)
     with open(OUTPUT_CSV, "a", newline='', encoding='utf-8') as f_out:
         writer = csv.writer(f_out)
         
-        # 如果是新文件，写入表头
         if not file_exists or os.path.getsize(OUTPUT_CSV) == 0:
             writer.writerow(["name", "label"])
         else:
-            # 如果文件已存在，先读取已有的实体，防止重启脚本时重复写入
             print("Loading existing results to avoid duplicates...")
             with open(OUTPUT_CSV, "r", encoding="utf-8") as f_read:
                 reader = csv.reader(f_read)
-                next(reader, None) # 跳过表头
+                next(reader, None)
                 for row in reader:
                     if row: seen_entities.add(row[0])
             print(f"Already extracted: {len(seen_entities)} entities.")
 
-        # 3. 循环处理
         for item in tqdm(data, desc="Extracting"):
             context = item.get("context", "")
             
-            # 如果这条数据太短或为空，跳过
             if not context or len(context) < 5:
                 continue
 
@@ -180,18 +154,14 @@ def main():
                 name = entity.get("name", "").strip()
                 label = entity.get("label", "").strip()
                 
-                # 简单的后处理规则：过滤过短的非白名单词
-                # (这里保留了你的原始逻辑，但稍微放宽了条件，因为模型有上下文判断会更准)
                 if len(name) < 2 and name not in ["肺", "心", "肝", "脾", "肾", "气", "血", "姜", "葱", "蒜", "茶", "酒"]:
                     continue
                 
-                # 核心去重逻辑：只写入没见过的实体
                 if name and label and name not in seen_entities:
                     writer.writerow([name, label])
-                    seen_entities.add(name) # 标记为已见
+                    seen_entities.add(name)
                     new_entries_count += 1
             
-            # 【关键】每处理完一条文本，就强制刷新缓冲区，确保写入硬盘
             if new_entries_count > 0:
                 f_out.flush()
 

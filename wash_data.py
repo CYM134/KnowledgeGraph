@@ -54,7 +54,6 @@ Relation = Tuple[str, str, str]
 
 
 def sanitize_name(name: str) -> str:
-    """Remove wrapper punctuation and trim whitespace."""
     if not isinstance(name, str):
         return ""
     return name.replace("《", "").replace("》", "").strip()

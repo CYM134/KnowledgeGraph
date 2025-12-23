@@ -1,11 +1,17 @@
+import csv
 import json
-import re
 import os
+import re
+from collections import Counter, defaultdict
+from typing import Any, Dict, Iterable, List, Set, Tuple
 from tqdm import tqdm
 
 # --- 配置区域 ---
-INPUT_FILE = "extracted.jsonl"
-OUTPUT_DIR = "cleaning_results_v2" # 输出到新文件夹
+INPUT_NODES_FILE = "step1_entities_with_context.jsonl"
+INPUT_RELATIONS_FILE = "relations_with_season.csv"
+OUTPUT_DIR = "cleaning_results_v3"  
+OUTPUT_NODES_FILE = os.path.join(OUTPUT_DIR, "clean_nodes.csv")
+OUTPUT_RELATIONS_FILE = os.path.join(OUTPUT_DIR, "clean_relations.csv")
 
 # 24节气（用于回填）
 SOLAR_TERMS = {
@@ -22,9 +28,7 @@ ENTITY_BLACKLIST = {
     "相关", "非常", "重要", "主要", "一般", "往往", "中医", "西医",
     "中国", "我国", "明显", "很多", "尤其", "但是", "而且", "这个", "那个"
 }
-
-# 实体白名单 (单字也保留)
-# 实体白名单 (即使长度为1也保留的实体)
+# 实体白名单
 ENTITY_WHITELIST = {
     # --- 1. 核心理论与自然 ---
     "金", "木", "水", "火", "土", 
@@ -82,178 +86,226 @@ ENTITY_WHITELIST = {
     "云", # 巧云/物候 (id 961)
     "外", # 户外/外邪 (id 977) 
 }
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-class FileManager:
-    def __init__(self, base_dir):
+
+class RejectLogger:
+    def __init__(self, base_dir: str):
         self.base_dir = base_dir
-        self.files = {}
-        self.passed_file = open(os.path.join(base_dir, "kg_final_passed.jsonl"), "w", encoding="utf-8")
+        self.files: Dict[str, Any] = {}
+        if not os.path.exists(self.base_dir):
+            os.makedirs(self.base_dir, exist_ok=True)
 
-    def write_passed(self, data):
-        self.passed_file.write(json.dumps(data, ensure_ascii=False) + "\n")
-
-    def write_rejected(self, reason_category, data):
-        filename = f"reject_{reason_category}.jsonl"
+    def log(self, category: str, data: dict) -> None:
+        filename = os.path.join(self.base_dir, f"{category}.jsonl")
         if filename not in self.files:
-            self.files[filename] = open(os.path.join(self.base_dir, filename), "w", encoding="utf-8")
+            self.files[filename] = open(filename, "w", encoding="utf-8")
         self.files[filename].write(json.dumps(data, ensure_ascii=False) + "\n")
 
-    def close_all(self):
-        self.passed_file.close()
+    def close(self) -> None:
         for f in self.files.values():
             f.close()
 
-def clean_string(text):
-    if not text: return ""
+
+def clean_string(text: str) -> str:
+    if not text:
+        return ""
     text = text.strip()
     text = re.sub(r'^[\"\'《“‘]+|[\"\'》”’。，]+$', '', text)
     return text
 
-def validate_entity(entity):
-    if not entity: return False, "empty"
-    if len(entity) < 2 and entity not in ENTITY_WHITELIST: return False, "entity_too_short"
-    if entity in ENTITY_BLACKLIST: return False, "entity_blacklist"
-    if re.match(r'^[0-9\.]+$', entity): return False, "entity_numeric"
-    if "http" in entity or "www" in entity: return False, "entity_url"
+
+def validate_entity(entity: str) -> Tuple[bool, str]:
+    if not entity:
+        return False, "empty"
+    if len(entity) < 2 and entity not in ENTITY_WHITELIST:
+        return False, "entity_too_short"
+    if entity in ENTITY_BLACKLIST:
+        return False, "entity_blacklist"
+    if re.match(r'^[0-9\\.]+$', entity):
+        return False, "entity_numeric"
+    if "http" in entity or "www" in entity:
+        return False, "entity_url"
     return True, "passed"
 
-def process_line(data, file_manager):
-    extracted = data.get("extracted", {})
-    doc_id = data.get("id")
-    context_snippet = data.get("context", "")[:100]
 
-    # --- 0. 核心检查：是否全是空？ ---
-    # 如果 extracted 本身是 None，或者 三个字段都是空列表
-    if not extracted:
-        file_manager.write_rejected("empty_result", {"id": doc_id, "reason": "extracted field is missing", "context": context_snippet})
-        return
-
-    raw_entities = extracted.get("entities", [])
-    raw_relations = extracted.get("relations", [])
-    raw_attributes = extracted.get("attributes", [])
-
-    # 检查是否三个列表都为空
-    if not raw_entities and not raw_relations and not raw_attributes:
-        file_manager.write_rejected("empty_result", {
-            "id": doc_id, 
-            "reason": "entities/relations/attributes all empty", 
-            "context": context_snippet
-        })
-        return
-
-    # --- 1. 处理实体 ---
-    clean_entities_set = set()
-    
-    for ent in raw_entities:
-        cleaned_ent = clean_string(ent)
-        is_valid, reason = validate_entity(cleaned_ent)
-        
-        if is_valid:
-            clean_entities_set.add(cleaned_ent)
-        else:
-            # 记录拒绝的实体
-            file_manager.write_rejected(reason, {
-                "id": doc_id,
-                "invalid_entity": ent,
-                "reason": reason,
-                "context": context_snippet
-            })
-
-    # --- 2. 智能回填季节 ---
-    current_season = data.get("season", "未知")
-    if current_season == "未知" or not current_season:
-        for ent in clean_entities_set:
-            for term in SOLAR_TERMS:
-                if term in ent:
-                    current_season = term
-                    break
-            if current_season != "未知":
-                break
-
-    # --- 3. 处理关系 ---
-    clean_relations_list = []
-    seen_rels = set()
-    
-    for rel in raw_relations:
-        if not isinstance(rel, list) or len(rel) < 3:
-            file_manager.write_rejected("relation_format_error", {"id": doc_id, "invalid_rel": rel})
+def infer_season(season: str, names: Iterable[str]) -> str:
+    season = clean_string(season) or "未知"
+    if season and season != "未知":
+        return season
+    for name in names:
+        if not name:
             continue
+        for term in SOLAR_TERMS:
+            if term in name:
+                return term
+    return "未知"
 
-        head = clean_string(rel[0])
-        relation_type = clean_string(rel[1])
-        tail = clean_string(rel[2])
 
-        # 依赖检查
-        is_head_valid, h_reason = validate_entity(head)
-        is_tail_valid, t_reason = validate_entity(tail)
-        
-        if not is_head_valid or not is_tail_valid:
-            file_manager.write_rejected("relation_bad_entity", {
-                "id": doc_id, 
-                "invalid_rel": rel, 
-                "reason": f"Head:{h_reason}, Tail:{t_reason}"
-            })
-            continue
+def load_nodes(nodes_path: str, logger: RejectLogger) -> Tuple[Dict[str, str], Set[str]]:
+    label_votes: Dict[str, Counter] = defaultdict(Counter)
+    valid_nodes: Set[str] = set()
+    total_entities = 0
 
-        if head == tail:
-            file_manager.write_rejected("relation_self_loop", {"id": doc_id, "invalid_rel": rel})
-            continue
-
-        # 确保关系中的实体被加入实体集
-        clean_entities_set.add(head)
-        clean_entities_set.add(tail)
-
-        rel_tuple = (head, relation_type, tail)
-        if rel_tuple not in seen_rels:
-            seen_rels.add(rel_tuple)
-            clean_relations_list.append([head, relation_type, tail])
-
-    # --- 4. 再次检查清洗后的结果 ---
-    # 如果清洗后变成了空结果（原本有脏数据，被洗没了），也算作空结果
-    if not clean_entities_set and not clean_relations_list:
-         file_manager.write_rejected("empty_after_cleaning", {
-            "id": doc_id, 
-            "reason": "All data filtered out", 
-            "context": context_snippet
-        })
-         return
-
-    # --- 5. 写入通过数据 ---
-    final_data = {
-        "id": doc_id,
-        "title": data.get("title", ""),
-        "season": current_season,
-        "context": data.get("context", ""),
-        "kg_data": {
-            "entities": list(clean_entities_set),
-            "relations": clean_relations_list
-        }
-    }
-    file_manager.write_passed(final_data)
-
-def main():
-    if not os.path.exists(INPUT_FILE):
-        print(f"错误: 找不到输入文件 {INPUT_FILE}")
-        return
-
-    fm = FileManager(OUTPUT_DIR)
-    
-    print("开始清洗数据...")
-    print(f"结果将保存在文件夹: {OUTPUT_DIR}/")
-    
-    with open(INPUT_FILE, "r", encoding="utf-8") as f_in:
-        for line in tqdm(f_in):
-            if not line.strip(): continue
+    with open(nodes_path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(tqdm(f, desc="加载节点", unit="行"), 1):
+            if not line.strip():
+                continue
             try:
-                raw_data = json.loads(line)
-                process_line(raw_data, fm)
+                record = json.loads(line)
             except json.JSONDecodeError:
+                logger.log("reject_node_json_error", {"line_no": line_no})
                 continue
 
-    fm.close_all()
-    print("\n清洗完成！")
+            context_snippet = record.get("context", "")[:100]
+            for ent in record.get("entities") or []:
+                total_entities += 1
+                name = clean_string(ent.get("name", ""))
+                label = ent.get("label") or "Entity"
+
+                is_valid, reason = validate_entity(name)
+                if not is_valid:
+                    logger.log(
+                        f"reject_node_{reason}",
+                        {
+                            "line_no": line_no,
+                            "name": ent.get("name"),
+                            "label": label,
+                            "context": context_snippet,
+                        },
+                    )
+                    continue
+
+                valid_nodes.add(name)
+                label_votes[name][label] += 1
+
+    nodes: Dict[str, str] = {}
+    for name, votes in label_votes.items():
+        nodes[name] = votes.most_common(1)[0][0] if votes else "Entity"
+
+    print(f"节点候选: {len(nodes)} 个，累计实体记录 {total_entities} 条")
+    return nodes, valid_nodes
+
+
+def load_relations(
+    rel_path: str, valid_nodes: Set[str], logger: RejectLogger
+) -> List[Tuple[str, str, str, str]]:
+    cleaned: List[Tuple[str, str, str, str]] = []
+    seen: Set[Tuple[str, str, str, str]] = set()
+
+    with open(rel_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            print("关系文件为空或缺少表头")
+            return cleaned
+
+        for row_no, row in enumerate(tqdm(reader, desc="加载关系", unit="条"), start=2):
+            head = clean_string(
+                row.get("source")
+                or row.get("head")
+                or row.get("subject")
+                or ""
+            )
+            tail = clean_string(
+                row.get("target")
+                or row.get("tail")
+                or row.get("object")
+                or ""
+            )
+            relation_type = clean_string(row.get("type") or row.get("relation") or "")
+            season = clean_string(row.get("season") or "") or "未知"
+
+            if not relation_type:
+                logger.log(
+                    "reject_relation_format_error",
+                    {"row": row_no, "relation": row},
+                )
+                continue
+
+            is_head_valid, h_reason = validate_entity(head)
+            is_tail_valid, t_reason = validate_entity(tail)
+            if not is_head_valid or not is_tail_valid:
+                logger.log(
+                    "reject_relation_bad_entity",
+                    {
+                        "row": row_no,
+                        "relation": row,
+                        "reason": f"Head:{h_reason}, Tail:{t_reason}",
+                    },
+                )
+                continue
+
+            if head == tail:
+                logger.log(
+                    "reject_relation_self_loop",
+                    {"row": row_no, "relation": row},
+                )
+                continue
+
+            if valid_nodes and (head not in valid_nodes or tail not in valid_nodes):
+                logger.log(
+                    "reject_relation_missing_node",
+                    {"row": row_no, "relation": row},
+                )
+                continue
+
+            season = infer_season(season, [head, tail])
+            rel_tuple = (head, tail, relation_type, season)
+            if rel_tuple in seen:
+                continue
+
+            seen.add(rel_tuple)
+            cleaned.append(rel_tuple)
+
+    print(f"有效关系: {len(cleaned)} 条")
+    return cleaned
+
+
+def write_nodes(path: str, nodes: Dict[str, str]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["name", "label"])
+        for name in sorted(nodes.keys()):
+            writer.writerow([name, nodes[name]])
+
+
+def write_relations(path: str, relations: List[Tuple[str, str, str, str]]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["source", "target", "type", "season"])
+        for head, tail, relation_type, season in relations:
+            writer.writerow([head, tail, relation_type, season])
+
+
+def main() -> None:
+    if not os.path.exists(INPUT_NODES_FILE):
+        print(f"错误: 找不到节点文件 {INPUT_NODES_FILE}")
+        return
+    if not os.path.exists(INPUT_RELATIONS_FILE):
+        print(f"错误: 找不到关系文件 {INPUT_RELATIONS_FILE}")
+        return
+
+    logger = RejectLogger(OUTPUT_DIR)
+
+    print("开始清洗节点与关系...")
+    nodes, valid_nodes = load_nodes(INPUT_NODES_FILE, logger)
+    node_names = set(nodes.keys())
+
+    if not node_names:
+        logger.close()
+        print("没有可用节点，终止。")
+        return
+
+    relations = load_relations(INPUT_RELATIONS_FILE, node_names, logger)
+
+    write_nodes(OUTPUT_NODES_FILE, nodes)
+    write_relations(OUTPUT_RELATIONS_FILE, relations)
+    logger.close()
+
+    print(f"已写入节点: {OUTPUT_NODES_FILE} ({len(nodes)} 条)")
+    print(f"已写入关系: {OUTPUT_RELATIONS_FILE} ({len(relations)} 条)")
+    print("清洗完成！")
+
 
 if __name__ == "__main__":
     main()
